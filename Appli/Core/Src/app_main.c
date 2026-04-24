@@ -62,16 +62,33 @@
 #define APP_SERVO_TICK_FREQUENCY_HZ 1000000U
 #define APP_SERVO_PERIOD_US (APP_SERVO_TICK_FREQUENCY_HZ / APP_SERVO_PWM_FREQUENCY_HZ)
 #define APP_BUTTON_TOGGLE_DEBOUNCE_MS 150U
-#define APP_SERVO_SAFE_PULSE_US 1500U
-#define APP_SERVO_OPEN_PULSE_US 700U
-#define APP_SERVO_CLOSE_PULSE_US 1600U
+#define APP_SERVO_DEMO_TRIGGER_MS 50U
+#define APP_SERVO_DEMO_STEP_HOLD_MS 700U
+#define APP_CLAMP_SERVO_SAFE_PULSE_US 1500U
+#define APP_CLAMP_SERVO_OPEN_PULSE_US 700U
+#define APP_CLAMP_SERVO_CLOSE_PULSE_US 1600U
+#define APP_FORE_AFT_SERVO_AFT_PULSE_US 900U
+#define APP_FORE_AFT_SERVO_FORE_PULSE_US 1800U
+#define APP_FORE_AFT_SERVO_CENTER_PULSE_US 1500U
+#define APP_GRIPPER_LIFT_SERVO_UP_PULSE_US 1500U
+#define APP_GRIPPER_LIFT_SERVO_DOWN_PULSE_US 1000U
+#define APP_LEFT_RIGHT_SERVO_CENTER_PULSE_US 1500U
+#define APP_LEFT_RIGHT_SERVO_LEFT_PULSE_US 2000U
+#define APP_LEFT_RIGHT_SERVO_RIGHT_PULSE_US 1000U
 
 typedef enum
 {
-  APP_SERVO_STATE_SAFE = 0,
-  APP_SERVO_STATE_OPEN,
-  APP_SERVO_STATE_CLOSE
-} App_ServoState;
+  APP_CLAMP_SERVO_STATE_SAFE = 0,
+  APP_CLAMP_SERVO_STATE_OPEN,
+  APP_CLAMP_SERVO_STATE_CLOSE
+} App_ClampServoState;
+
+typedef enum
+{
+  APP_LEFT_RIGHT_SERVO_STATE_CENTER = 0,
+  APP_LEFT_RIGHT_SERVO_STATE_LEFT,
+  APP_LEFT_RIGHT_SERVO_STATE_RIGHT
+} App_LeftRightServoState;
 
 typedef struct
 {
@@ -103,18 +120,29 @@ static uint32_t app_last_blink_tick = 0U;
 static uint32_t app_last_heartbeat_tick = 0U;
 static uint32_t app_last_sensor_tick = 0U;
 static uint32_t app_last_button_toggle_tick = 0U;
+static uint32_t app_button_press_tick = 0U;
 static bool app_button_pressed = false;
 static bool app_last_button_pressed = false;
-static App_ServoState app_servo_state = APP_SERVO_STATE_SAFE;
-static uint16_t app_servo_current_pulse_us = APP_SERVO_SAFE_PULSE_US;
+static App_ClampServoState app_clamp_servo_state = APP_CLAMP_SERVO_STATE_SAFE;
+static uint16_t app_clamp_servo_current_pulse_us = APP_CLAMP_SERVO_SAFE_PULSE_US;
+static uint16_t app_fore_aft_servo_current_pulse_us = APP_FORE_AFT_SERVO_CENTER_PULSE_US;
+static uint16_t app_gripper_lift_servo_current_pulse_us = APP_GRIPPER_LIFT_SERVO_UP_PULSE_US;
+static App_LeftRightServoState app_left_right_servo_state = APP_LEFT_RIGHT_SERVO_STATE_CENTER;
+static uint16_t app_left_right_servo_current_pulse_us = APP_LEFT_RIGHT_SERVO_CENTER_PULSE_US;
 
 static void App_LPUART1_UART_Init(void);
 static void App_I2C1_Init(void);
 static void App_GPIO_Init(void);
+static bool App_ServoConfigureTimer(TIM_HandleTypeDef *timer_handle, const char *timer_name);
 static bool App_ServoConfigureTiming(void);
 static bool App_ServoInit(void);
-static void App_ServoApplyPulse(uint16_t pulse_width_us);
-static void App_ServoToggleState(void);
+static void App_ClampServoApplyPulse(uint16_t pulse_width_us);
+static void App_ForeAftServoApplyPulse(uint16_t pulse_width_us);
+static void App_GripperLiftServoApplyPulse(uint16_t pulse_width_us);
+static void App_LeftRightServoApplyPulse(uint16_t pulse_width_us);
+static const char *App_LeftRightServoStateName(App_LeftRightServoState state);
+static void App_LeftRightServoMoveToState(App_LeftRightServoState state);
+static void App_RunServoFullRangeDemo(void);
 static bool Phase0_IsButtonPressed(void);
 static void Phase0_SetLedState(GPIO_TypeDef *gpio_port, uint16_t gpio_pin, bool on);
 static void Phase0_LogStartup(bool button_pressed);
@@ -180,6 +208,7 @@ void App_Init(void)
   app_last_heartbeat_tick = app_last_blink_tick;
   app_last_sensor_tick = app_last_blink_tick;
   app_last_button_toggle_tick = 0U;
+  app_button_press_tick = 0U;
 
   Phase0_SetLedState(APP_LD1_BLUE_GPIO_Port, APP_LD1_BLUE_Pin, true);
   Phase0_SetLedState(APP_LD2_RED_GPIO_Port, APP_LD2_RED_Pin, app_button_pressed);
@@ -207,28 +236,35 @@ void App_RunLoopIteration(void)
 
     if (app_button_pressed)
     {
+      app_button_press_tick = now;
       printf("[button] pressed\r\n");
-      if ((now - app_last_button_toggle_tick) >= APP_BUTTON_TOGGLE_DEBOUNCE_MS)
-      {
-        app_last_button_toggle_tick = now;
-        App_ServoToggleState();
-      }
     }
     else
     {
-      printf("[button] released\r\n");
+      uint32_t held_ms = now - app_button_press_tick;
+
+      printf("[button] released held=%lu ms\r\n", (unsigned long)held_ms);
+
+      if ((now - app_last_button_toggle_tick) >= APP_BUTTON_TOGGLE_DEBOUNCE_MS &&
+          held_ms >= APP_SERVO_DEMO_TRIGGER_MS)
+      {
+        app_last_button_toggle_tick = now;
+        App_RunServoFullRangeDemo();
+      }
     }
   }
 
   if ((now - app_last_heartbeat_tick) >= 1000U)
   {
     app_last_heartbeat_tick = now;
-    printf("[tick] %lu ms, button=%s, servo=%u us, state=%s\r\n",
+       printf("[tick] %lu ms, button=%s, clamp=%u us, fore_aft=%u us, gripper_lift=%u us, left_right=%u us, left_right_state=%s\r\n",
            (unsigned long)now,
            app_button_pressed ? "pressed" : "released",
-           app_servo_current_pulse_us,
-           app_servo_state == APP_SERVO_STATE_CLOSE ? "close" :
-           (app_servo_state == APP_SERVO_STATE_OPEN ? "open" : "safe"));
+           app_clamp_servo_current_pulse_us,
+           app_fore_aft_servo_current_pulse_us,
+           app_gripper_lift_servo_current_pulse_us,
+         app_left_right_servo_current_pulse_us,
+         App_LeftRightServoStateName(app_left_right_servo_state));
   }
 
   if ((now - app_last_sensor_tick) >= 1000U)
@@ -245,28 +281,56 @@ static bool App_ServoInit(void)
     return false;
   }
 
-  App_ServoApplyPulse(APP_SERVO_OPEN_PULSE_US);
+  App_ClampServoApplyPulse(APP_CLAMP_SERVO_OPEN_PULSE_US);
+  App_ForeAftServoApplyPulse(APP_FORE_AFT_SERVO_CENTER_PULSE_US);
+  App_GripperLiftServoApplyPulse(APP_GRIPPER_LIFT_SERVO_UP_PULSE_US);
+  app_left_right_servo_state = APP_LEFT_RIGHT_SERVO_STATE_CENTER;
+  App_LeftRightServoApplyPulse(APP_LEFT_RIGHT_SERVO_CENTER_PULSE_US);
 
   if (HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_1) != HAL_OK)
   {
     return false;
   }
 
-  app_servo_state = APP_SERVO_STATE_OPEN;
+  if (HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_2) != HAL_OK)
+  {
+    return false;
+  }
 
-  printf("[servo] TIM1 CH1 started, %u Hz period=%u us safe=%u us\r\n",
+  if (HAL_TIM_PWM_Start(&htim2, TIM_CHANNEL_3) != HAL_OK)
+  {
+    return false;
+  }
+
+  if (HAL_TIM_PWM_Start(&htim16, TIM_CHANNEL_1) != HAL_OK)
+  {
+    return false;
+  }
+
+  app_clamp_servo_state = APP_CLAMP_SERVO_STATE_OPEN;
+
+  printf("[servo] timers started, %u Hz period=%u us safe=%u us\r\n",
          APP_SERVO_PWM_FREQUENCY_HZ,
          APP_SERVO_PERIOD_US,
-         APP_SERVO_SAFE_PULSE_US);
-    printf("[servo] action mode: press button to toggle release/clamp open=%u us close=%u us\r\n",
-         APP_SERVO_OPEN_PULSE_US,
-         APP_SERVO_CLOSE_PULSE_US);
-    printf("[servo] startup state=open pulse=%u us\r\n", APP_SERVO_OPEN_PULSE_US);
+         APP_CLAMP_SERVO_SAFE_PULSE_US);
+  printf("[servo] clamp CH1 fixed open=%u us while fore_aft CH2 and gripper_lift CH3 stay safe at startup\r\n",
+         APP_CLAMP_SERVO_OPEN_PULSE_US);
+  printf("[servo] fore_aft CH2 fixed center=%u us\r\n", APP_FORE_AFT_SERVO_CENTER_PULSE_US);
+  printf("[servo] gripper_lift CH3 fixed up=%u us\r\n", APP_GRIPPER_LIFT_SERVO_UP_PULSE_US);
+  printf("[servo] button demo: short press runs one full-range sweep across all 4 axes\r\n");
+  printf("[servo] left_right CH4 left=%u us right=%u us center=%u us\r\n",
+        APP_LEFT_RIGHT_SERVO_LEFT_PULSE_US,
+        APP_LEFT_RIGHT_SERVO_RIGHT_PULSE_US,
+        APP_LEFT_RIGHT_SERVO_CENTER_PULSE_US);
+  printf("[servo] clamp CH1 startup state=open pulse=%u us\r\n", APP_CLAMP_SERVO_OPEN_PULSE_US);
+  printf("[servo] fore_aft CH2 startup center hold=%u us\r\n", APP_FORE_AFT_SERVO_CENTER_PULSE_US);
+  printf("[servo] gripper_lift CH3 startup up hold=%u us\r\n", APP_GRIPPER_LIFT_SERVO_UP_PULSE_US);
+      printf("[servo] left_right CH4 startup center hold=%u us\r\n", APP_LEFT_RIGHT_SERVO_CENTER_PULSE_US);
 
   return true;
 }
 
-static bool App_ServoConfigureTiming(void)
+static bool App_ServoConfigureTimer(TIM_HandleTypeDef *timer_handle, const char *timer_name)
 {
   uint32_t tim_clock_hz = HAL_RCCEx_GetTIMGFreq();
   uint32_t prescaler_divider;
@@ -289,17 +353,18 @@ static bool App_ServoConfigureTiming(void)
     return false;
   }
 
-  __HAL_TIM_DISABLE(&htim1);
+  __HAL_TIM_DISABLE(timer_handle);
 
-  htim1.Init.Prescaler = prescaler_value;
-  htim1.Init.Period = APP_SERVO_PERIOD_US - 1U;
+  timer_handle->Init.Prescaler = prescaler_value;
+  timer_handle->Init.Period = APP_SERVO_PERIOD_US - 1U;
 
-  __HAL_TIM_SET_PRESCALER(&htim1, prescaler_value);
-  __HAL_TIM_SET_AUTORELOAD(&htim1, APP_SERVO_PERIOD_US - 1U);
-  __HAL_TIM_SET_COUNTER(&htim1, 0U);
-  htim1.Instance->EGR = TIM_EGR_UG;
+  __HAL_TIM_SET_PRESCALER(timer_handle, prescaler_value);
+  __HAL_TIM_SET_AUTORELOAD(timer_handle, APP_SERVO_PERIOD_US - 1U);
+  __HAL_TIM_SET_COUNTER(timer_handle, 0U);
+  timer_handle->Instance->EGR = TIM_EGR_UG;
 
-  printf("[servo] timg=%lu Hz prescaler=%lu arr=%u\r\n",
+  printf("[servo] %s timg=%lu Hz prescaler=%lu arr=%u\r\n",
+         timer_name,
          (unsigned long)tim_clock_hz,
          (unsigned long)prescaler_value,
          (unsigned int)(APP_SERVO_PERIOD_US - 1U));
@@ -307,26 +372,130 @@ static bool App_ServoConfigureTiming(void)
   return true;
 }
 
-static void App_ServoApplyPulse(uint16_t pulse_width_us)
+static bool App_ServoConfigureTiming(void)
 {
-  app_servo_current_pulse_us = pulse_width_us;
+  if (!App_ServoConfigureTimer(&htim1, "TIM1"))
+  {
+    return false;
+  }
+
+  if (!App_ServoConfigureTimer(&htim2, "TIM2"))
+  {
+    return false;
+  }
+
+  if (!App_ServoConfigureTimer(&htim16, "TIM16"))
+  {
+    return false;
+  }
+
+  return true;
+}
+
+static void App_ClampServoApplyPulse(uint16_t pulse_width_us)
+{
+  app_clamp_servo_current_pulse_us = pulse_width_us;
   __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_1, pulse_width_us);
 }
 
-static void App_ServoToggleState(void)
+static void App_ForeAftServoApplyPulse(uint16_t pulse_width_us)
 {
-  if (app_servo_state == APP_SERVO_STATE_CLOSE)
+  app_fore_aft_servo_current_pulse_us = pulse_width_us;
+  __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_2, pulse_width_us);
+}
+
+static void App_GripperLiftServoApplyPulse(uint16_t pulse_width_us)
+{
+  app_gripper_lift_servo_current_pulse_us = pulse_width_us;
+  __HAL_TIM_SET_COMPARE(&htim2, TIM_CHANNEL_3, pulse_width_us);
+}
+
+static void App_LeftRightServoApplyPulse(uint16_t pulse_width_us)
+{
+  app_left_right_servo_current_pulse_us = pulse_width_us;
+  __HAL_TIM_SET_COMPARE(&htim16, TIM_CHANNEL_1, pulse_width_us);
+}
+
+static const char *App_LeftRightServoStateName(App_LeftRightServoState state)
+{
+  switch (state)
   {
-    app_servo_state = APP_SERVO_STATE_OPEN;
-    App_ServoApplyPulse(APP_SERVO_OPEN_PULSE_US);
-    printf("[servo] toggle open=%u us\r\n", APP_SERVO_OPEN_PULSE_US);
+    case APP_LEFT_RIGHT_SERVO_STATE_LEFT:
+      return "left";
+
+    case APP_LEFT_RIGHT_SERVO_STATE_RIGHT:
+      return "right";
+
+    case APP_LEFT_RIGHT_SERVO_STATE_CENTER:
+    default:
+      return "center";
+  }
+}
+
+static void App_LeftRightServoMoveToState(App_LeftRightServoState state)
+{
+  app_left_right_servo_state = state;
+
+  if (state == APP_LEFT_RIGHT_SERVO_STATE_LEFT)
+  {
+    App_LeftRightServoApplyPulse(APP_LEFT_RIGHT_SERVO_LEFT_PULSE_US);
+  }
+  else if (state == APP_LEFT_RIGHT_SERVO_STATE_RIGHT)
+  {
+    App_LeftRightServoApplyPulse(APP_LEFT_RIGHT_SERVO_RIGHT_PULSE_US);
   }
   else
   {
-    app_servo_state = APP_SERVO_STATE_CLOSE;
-    App_ServoApplyPulse(APP_SERVO_CLOSE_PULSE_US);
-    printf("[servo] toggle close=%u us\r\n", APP_SERVO_CLOSE_PULSE_US);
+    App_LeftRightServoApplyPulse(APP_LEFT_RIGHT_SERVO_CENTER_PULSE_US);
   }
+}
+
+static void App_RunServoFullRangeDemo(void)
+{
+  printf("[servo_demo] start full-range sweep left_right-first\r\n");
+
+  App_LeftRightServoMoveToState(APP_LEFT_RIGHT_SERVO_STATE_RIGHT);
+  printf("[servo_demo] left_right right=%u us\r\n", APP_LEFT_RIGHT_SERVO_RIGHT_PULSE_US);
+  HAL_Delay(APP_SERVO_DEMO_STEP_HOLD_MS);
+
+  App_LeftRightServoMoveToState(APP_LEFT_RIGHT_SERVO_STATE_LEFT);
+  printf("[servo_demo] left_right left=%u us\r\n", APP_LEFT_RIGHT_SERVO_LEFT_PULSE_US);
+  HAL_Delay(APP_SERVO_DEMO_STEP_HOLD_MS);
+
+  App_LeftRightServoMoveToState(APP_LEFT_RIGHT_SERVO_STATE_CENTER);
+  printf("[servo_demo] left_right center=%u us\r\n", APP_LEFT_RIGHT_SERVO_CENTER_PULSE_US);
+  HAL_Delay(APP_SERVO_DEMO_STEP_HOLD_MS);
+
+  app_clamp_servo_state = APP_CLAMP_SERVO_STATE_CLOSE;
+  App_ClampServoApplyPulse(APP_CLAMP_SERVO_CLOSE_PULSE_US);
+  printf("[servo_demo] clamp close=%u us\r\n", APP_CLAMP_SERVO_CLOSE_PULSE_US);
+  HAL_Delay(APP_SERVO_DEMO_STEP_HOLD_MS);
+
+  app_clamp_servo_state = APP_CLAMP_SERVO_STATE_OPEN;
+  App_ClampServoApplyPulse(APP_CLAMP_SERVO_OPEN_PULSE_US);
+  printf("[servo_demo] clamp open=%u us\r\n", APP_CLAMP_SERVO_OPEN_PULSE_US);
+  HAL_Delay(APP_SERVO_DEMO_STEP_HOLD_MS);
+
+  App_ForeAftServoApplyPulse(APP_FORE_AFT_SERVO_AFT_PULSE_US);
+  printf("[servo_demo] fore_aft aft=%u us\r\n", APP_FORE_AFT_SERVO_AFT_PULSE_US);
+  HAL_Delay(APP_SERVO_DEMO_STEP_HOLD_MS);
+
+  App_ForeAftServoApplyPulse(APP_FORE_AFT_SERVO_FORE_PULSE_US);
+  printf("[servo_demo] fore_aft fore=%u us\r\n", APP_FORE_AFT_SERVO_FORE_PULSE_US);
+  HAL_Delay(APP_SERVO_DEMO_STEP_HOLD_MS);
+
+  App_ForeAftServoApplyPulse(APP_FORE_AFT_SERVO_CENTER_PULSE_US);
+  printf("[servo_demo] fore_aft center=%u us\r\n", APP_FORE_AFT_SERVO_CENTER_PULSE_US);
+  HAL_Delay(APP_SERVO_DEMO_STEP_HOLD_MS);
+
+  App_GripperLiftServoApplyPulse(APP_GRIPPER_LIFT_SERVO_DOWN_PULSE_US);
+  printf("[servo_demo] gripper_lift down=%u us\r\n", APP_GRIPPER_LIFT_SERVO_DOWN_PULSE_US);
+  HAL_Delay(APP_SERVO_DEMO_STEP_HOLD_MS);
+
+  App_GripperLiftServoApplyPulse(APP_GRIPPER_LIFT_SERVO_UP_PULSE_US);
+  printf("[servo_demo] gripper_lift up=%u us\r\n", APP_GRIPPER_LIFT_SERVO_UP_PULSE_US);
+  HAL_Delay(APP_SERVO_DEMO_STEP_HOLD_MS);
+  printf("[servo_demo] complete\r\n");
 }
 
 void HAL_I2C_MspInit(I2C_HandleTypeDef *hi2c)
@@ -500,6 +669,7 @@ static void Phase0_LogStartup(bool button_pressed)
   printf("[phase0] uart: LPUART1 115200 8N1 on PE5/PE6\r\n");
   printf("[phase0] led: LD3 heartbeat, LD2 mirrors button\r\n");
   printf("[phase0] button: initial state is %s\r\n", button_pressed ? "pressed" : "released");
+  printf("[phase0] button: short press runs one full-range sweep across all 4 axes\r\n");
 }
 
 static bool Phase1_IsDeviceReady(uint8_t address)
@@ -741,9 +911,18 @@ static bool Phase1_Vl53l0xReadMeasurement(uint8_t address, Phase1_Vl53l0xMeasure
   uint8_t status = 0U;
   uint32_t start_tick = HAL_GetTick();
 
-  if (!Phase1_Vl53l0xPrepareSingleShot(address) ||
-      !Phase1_WriteRegister8(address, VL53L0X_SYSRANGE_START_REG, 0x01U))
+  if (!Phase1_Vl53l0xPrepareSingleShot(address))
   {
+    printf("[vl53l0x] prepare single-shot failed i2c_err=0x%08lX stop=0x%02X\r\n",
+           (unsigned long)hi2c1.ErrorCode,
+           phase1_vl53l0x_stop_variable);
+    return false;
+  }
+
+  if (!Phase1_WriteRegister8(address, VL53L0X_SYSRANGE_START_REG, 0x01U))
+  {
+    printf("[vl53l0x] start single-shot failed i2c_err=0x%08lX\r\n",
+           (unsigned long)hi2c1.ErrorCode);
     return false;
   }
 
@@ -751,6 +930,8 @@ static bool Phase1_Vl53l0xReadMeasurement(uint8_t address, Phase1_Vl53l0xMeasure
   {
     if (!Phase1_ReadRegister8(address, VL53L0X_SYSRANGE_START_REG, &status))
     {
+      printf("[vl53l0x] poll start failed i2c_err=0x%08lX\r\n",
+             (unsigned long)hi2c1.ErrorCode);
       return false;
     }
 
@@ -761,6 +942,9 @@ static bool Phase1_Vl53l0xReadMeasurement(uint8_t address, Phase1_Vl53l0xMeasure
 
     if ((HAL_GetTick() - start_tick) >= PHASE1_VL53L0X_MEASUREMENT_TIMEOUT_MS)
     {
+      printf("[vl53l0x] start timeout sysrange=0x%02X elapsed=%lu ms\r\n",
+             status,
+             (unsigned long)(HAL_GetTick() - start_tick));
       return false;
     }
   }
@@ -770,6 +954,8 @@ static bool Phase1_Vl53l0xReadMeasurement(uint8_t address, Phase1_Vl53l0xMeasure
   {
     if (!Phase1_ReadRegister8(address, VL53L0X_RESULT_INTERRUPT_STATUS_REG, &status))
     {
+      printf("[vl53l0x] poll interrupt failed i2c_err=0x%08lX\r\n",
+             (unsigned long)hi2c1.ErrorCode);
       return false;
     }
 
@@ -780,6 +966,9 @@ static bool Phase1_Vl53l0xReadMeasurement(uint8_t address, Phase1_Vl53l0xMeasure
 
     if ((HAL_GetTick() - start_tick) >= PHASE1_VL53L0X_MEASUREMENT_TIMEOUT_MS)
     {
+      printf("[vl53l0x] interrupt timeout irq=0x%02X elapsed=%lu ms\r\n",
+             status,
+             (unsigned long)(HAL_GetTick() - start_tick));
       return false;
     }
   }
@@ -788,6 +977,8 @@ static bool Phase1_Vl53l0xReadMeasurement(uint8_t address, Phase1_Vl53l0xMeasure
       !Phase1_ReadRegister16(address, (uint8_t)(VL53L0X_RESULT_RANGE_STATUS_REG + 10U), &measurement->range_mm) ||
       !Phase1_WriteRegister8(address, VL53L0X_SYSTEM_INTERRUPT_CLEAR_REG, 0x01U))
   {
+    printf("[vl53l0x] readout failed i2c_err=0x%08lX\r\n",
+           (unsigned long)hi2c1.ErrorCode);
     return false;
   }
 
@@ -870,7 +1061,6 @@ static void Phase1_LogVl53l0xRange(void)
 
   if (!Phase1_Vl53l0xReadMeasurement(VL53L0X_I2C_ADDR_DEFAULT, &measurement))
   {
-    printf("[vl53l0x] single-shot read failed\r\n");
     return;
   }
 
