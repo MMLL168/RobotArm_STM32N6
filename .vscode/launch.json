@@ -1,0 +1,195 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Debug Appli (ST-LINK)",
+      "type": "cortex-debug",
+      "request": "launch",
+      "servertype": "stlink",
+      "cwd": "${workspaceFolder}/Appli",
+      "executable": "${workspaceFolder}/Appli/build/Debug/STM32N6_Appli.elf",
+      "device": "STM32N657X0HxQ",
+      "serialNumber": "002000313434511734313937",
+      "armToolchainPath": "C:/Program Files (x86)/Arm GNU Toolchain arm-none-eabi/14.2 rel1/bin",
+      "gdbPath": "C:/Program Files (x86)/Arm GNU Toolchain arm-none-eabi/14.2 rel1/bin/arm-none-eabi-gdb.exe",
+      "gdbInterruptMode": "sigint",
+      "objdumpPath": "C:/Program Files (x86)/Arm GNU Toolchain arm-none-eabi/14.2 rel1/bin/arm-none-eabi-objdump.exe",
+      "serverpath": "C:/ST/STM32CubeIDE_1.18.1/STM32CubeIDE/plugins/com.st.stm32cube.ide.mcu.externaltools.stlink-gdb-server.win32_2.2.400.202601091506/tools/bin/ST-LINK_gdbserver.exe",
+      "stm32cubeprogrammer": "C:/ST/STM32CubeIDE_1.18.1/STM32CubeIDE/plugins/com.st.stm32cube.ide.mcu.externaltools.cubeprogrammer.win32_2.2.400.202601091506/tools/bin",
+      "interface": "swd",
+      "svdFile": "C:/Program Files/STMicroelectronics/STM32Cube/STM32CubeProgrammer/SVD/STM32N657.svd",
+      "serverArgs": [
+        "-m",
+        "1",
+        "-k",
+        "--frequency",
+        "1000",
+        "--pend-halt-timeout",
+        "5000"
+      ],
+      "overrideLaunchCommands": [
+        "monitor halt",
+        "load",
+        "set *(unsigned int*)0xE000ED08 = 0x34000400",
+        "set $sp = *(unsigned int*)0x34000400",
+        "set $pc = *(unsigned int*)0x34000404"
+      ],
+      "postResetCommands": [
+        "load",
+        "set *(unsigned int*)0xE000ED08 = 0x34000400",
+        "set $sp = *(unsigned int*)0x34000400",
+        "set $pc = *(unsigned int*)0x34000404"
+      ],
+      "postRestartCommands": [
+        "load",
+        "set *(unsigned int*)0xE000ED08 = 0x34000400",
+        "set $sp = *(unsigned int*)0x34000400",
+        "set $pc = *(unsigned int*)0x34000404"
+      ],
+      "runToEntryPoint": "main",
+      "preLaunchTask": "Appli: Build Debug"
+    },
+    {
+      "name": "Attach Appli (ST-LINK, running image)",
+      "type": "cortex-debug",
+      "request": "attach",
+      "servertype": "stlink",
+      "cwd": "${workspaceFolder}/Appli",
+      "executable": "${workspaceFolder}/Appli/build/Debug/STM32N6_Appli.elf",
+      "device": "STM32N657X0HxQ",
+      "serialNumber": "002000313434511734313937",
+      "armToolchainPath": "C:/Program Files (x86)/Arm GNU Toolchain arm-none-eabi/14.2 rel1/bin",
+      "gdbPath": "C:/Program Files (x86)/Arm GNU Toolchain arm-none-eabi/14.2 rel1/bin/arm-none-eabi-gdb.exe",
+      "objdumpPath": "C:/Program Files (x86)/Arm GNU Toolchain arm-none-eabi/14.2 rel1/bin/arm-none-eabi-objdump.exe",
+      "serverpath": "C:/ST/STM32CubeIDE_1.18.1/STM32CubeIDE/plugins/com.st.stm32cube.ide.mcu.externaltools.stlink-gdb-server.win32_2.2.400.202601091506/tools/bin/ST-LINK_gdbserver.exe",
+      "stm32cubeprogrammer": "C:/ST/STM32CubeIDE_1.18.1/STM32CubeIDE/plugins/com.st.stm32cube.ide.mcu.externaltools.cubeprogrammer.win32_2.2.400.202601091506/tools/bin",
+      "interface": "swd",
+      "svdFile": "C:/Program Files/STMicroelectronics/STM32Cube/STM32CubeProgrammer/SVD/STM32N657.svd",
+      "serverArgs": [
+        "-m",
+        "1"
+      ],
+      "showDevDebugOutput": "raw"
+    },
+    {
+      "name": "Debug Appli (OpenOCD + Live Watch)",
+      "type": "cortex-debug",
+      "request": "launch",
+      "servertype": "openocd",
+      "cwd": "${workspaceFolder}/Appli",
+      "executable": "${workspaceFolder}/Appli/build/Debug/STM32N6_Appli.elf",
+      "device": "STM32N657X0HxQ",
+      "armToolchainPath": "C:/Program Files (x86)/Arm GNU Toolchain arm-none-eabi/14.2 rel1/bin",
+      "gdbPath": "C:/Program Files (x86)/Arm GNU Toolchain arm-none-eabi/14.2 rel1/bin/arm-none-eabi-gdb.exe",
+      "objdumpPath": "C:/Program Files (x86)/Arm GNU Toolchain arm-none-eabi/14.2 rel1/bin/arm-none-eabi-objdump.exe",
+      "serverpath": "C:/ST/STM32CubeIDE_1.18.1/STM32CubeIDE/plugins/com.st.stm32cube.ide.mcu.externaltools.openocd.win32_2.4.400.202601091506/tools/bin/openocd.exe",
+      "searchDir": [
+        "C:/ST/STM32CubeIDE_1.18.1/STM32CubeIDE/plugins/com.st.stm32cube.ide.mcu.debug.openocd_2.3.300.202602021527/resources/openocd/st_scripts"
+      ],
+      "openOCDPreConfigLaunchCommands": [
+        "set CLOCK_FREQ 1000",
+        "set CONNECT_UNDER_RESET 1"
+      ],
+      "openOCDLaunchCommands": [
+        "reset_config srst_only srst_nogate connect_assert_srst"
+      ],
+      "configFiles": [
+        "interface/stlink.cfg",
+        "target/stm32n6x.cfg"
+      ],
+      "interface": "swd",
+      "svdFile": "C:/Program Files/STMicroelectronics/STM32Cube/STM32CubeProgrammer/SVD/STM32N657.svd",
+      "runToEntryPoint": "main",
+      "preLaunchTask": "Appli: Build Debug",
+      "liveWatch": {
+        "enabled": true,
+        "samplesPerSecond": 4
+      }
+    },
+    {
+      "name": "Debug FSBL (ST-LINK)",
+      "type": "cortex-debug",
+      "request": "launch",
+      "servertype": "stlink",
+      "cwd": "${workspaceFolder}/FSBL",
+      "executable": "${workspaceFolder}/FSBL/build/Debug/STM32N6_FSBL.elf",
+      "device": "STM32N657X0HxQ",
+      "serialNumber": "002000313434511734313937",
+      "armToolchainPath": "C:/Program Files (x86)/Arm GNU Toolchain arm-none-eabi/14.2 rel1/bin",
+      "gdbPath": "C:/Program Files (x86)/Arm GNU Toolchain arm-none-eabi/14.2 rel1/bin/arm-none-eabi-gdb.exe",
+      "objdumpPath": "C:/Program Files (x86)/Arm GNU Toolchain arm-none-eabi/14.2 rel1/bin/arm-none-eabi-objdump.exe",
+      "serverpath": "C:/ST/STM32CubeIDE_1.18.1/STM32CubeIDE/plugins/com.st.stm32cube.ide.mcu.externaltools.stlink-gdb-server.win32_2.2.400.202601091506/tools/bin/ST-LINK_gdbserver.exe",
+      "stm32cubeprogrammer": "C:/ST/STM32CubeIDE_1.18.1/STM32CubeIDE/plugins/com.st.stm32cube.ide.mcu.externaltools.cubeprogrammer.win32_2.2.400.202601091506/tools/bin",
+      "interface": "swd",
+      "svdFile": "C:/Program Files/STMicroelectronics/STM32Cube/STM32CubeProgrammer/SVD/STM32N657.svd",
+      "serverArgs": [
+        "-m",
+        "1",
+        "-k",
+        "--frequency",
+        "1000",
+        "--pend-halt-timeout",
+        "5000"
+      ],
+      "runToEntryPoint": "main",
+      "preLaunchTask": "FSBL: Build Debug"
+    },
+    {
+      "name": "Attach FSBL (ST-LINK, pinned probe)",
+      "type": "cortex-debug",
+      "request": "attach",
+      "servertype": "stlink",
+      "cwd": "${workspaceFolder}/FSBL",
+      "executable": "${workspaceFolder}/FSBL/build/Debug/STM32N6_FSBL.elf",
+      "device": "STM32N657X0HxQ",
+      "serialNumber": "002000313434511734313937",
+      "armToolchainPath": "C:/Program Files (x86)/Arm GNU Toolchain arm-none-eabi/14.2 rel1/bin",
+      "gdbPath": "C:/Program Files (x86)/Arm GNU Toolchain arm-none-eabi/14.2 rel1/bin/arm-none-eabi-gdb.exe",
+      "objdumpPath": "C:/Program Files (x86)/Arm GNU Toolchain arm-none-eabi/14.2 rel1/bin/arm-none-eabi-objdump.exe",
+      "serverpath": "C:/ST/STM32CubeIDE_1.18.1/STM32CubeIDE/plugins/com.st.stm32cube.ide.mcu.externaltools.stlink-gdb-server.win32_2.2.400.202601091506/tools/bin/ST-LINK_gdbserver.exe",
+      "stm32cubeprogrammer": "C:/ST/STM32CubeIDE_1.18.1/STM32CubeIDE/plugins/com.st.stm32cube.ide.mcu.externaltools.cubeprogrammer.win32_2.2.400.202601091506/tools/bin",
+      "interface": "swd",
+      "svdFile": "C:/Program Files/STMicroelectronics/STM32Cube/STM32CubeProgrammer/SVD/STM32N657.svd",
+      "serverArgs": [
+        "-m",
+        "1"
+      ],
+      "showDevDebugOutput": "raw"
+    },
+    {
+      "name": "Debug FSBL (OpenOCD + Live Watch)",
+      "type": "cortex-debug",
+      "request": "launch",
+      "servertype": "openocd",
+      "cwd": "${workspaceFolder}/FSBL",
+      "executable": "${workspaceFolder}/FSBL/build/Debug/STM32N6_FSBL.elf",
+      "device": "STM32N657X0HxQ",
+      "armToolchainPath": "C:/Program Files (x86)/Arm GNU Toolchain arm-none-eabi/14.2 rel1/bin",
+      "gdbPath": "C:/Program Files (x86)/Arm GNU Toolchain arm-none-eabi/14.2 rel1/bin/arm-none-eabi-gdb.exe",
+      "objdumpPath": "C:/Program Files (x86)/Arm GNU Toolchain arm-none-eabi/14.2 rel1/bin/arm-none-eabi-objdump.exe",
+      "serverpath": "C:/ST/STM32CubeIDE_1.18.1/STM32CubeIDE/plugins/com.st.stm32cube.ide.mcu.externaltools.openocd.win32_2.4.400.202601091506/tools/bin/openocd.exe",
+      "searchDir": [
+        "C:/ST/STM32CubeIDE_1.18.1/STM32CubeIDE/plugins/com.st.stm32cube.ide.mcu.debug.openocd_2.3.300.202602021527/resources/openocd/st_scripts"
+      ],
+      "openOCDPreConfigLaunchCommands": [
+        "set CLOCK_FREQ 1000",
+        "set CONNECT_UNDER_RESET 1"
+      ],
+      "openOCDLaunchCommands": [
+        "reset_config srst_only srst_nogate connect_assert_srst"
+      ],
+      "configFiles": [
+        "interface/stlink.cfg",
+        "target/stm32n6x.cfg"
+      ],
+      "interface": "swd",
+      "svdFile": "C:/Program Files/STMicroelectronics/STM32Cube/STM32CubeProgrammer/SVD/STM32N657.svd",
+      "runToEntryPoint": "main",
+      "preLaunchTask": "FSBL: Build Debug",
+      "liveWatch": {
+        "enabled": true,
+        "samplesPerSecond": 4
+      }
+    }
+  ]
+}

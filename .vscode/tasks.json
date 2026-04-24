@@ -1,0 +1,68 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "Appli: Configure Debug",
+      "type": "shell",
+      "command": "${env:ProgramFiles}/CMake/bin/cmake.exe",
+      "args": [
+        "--preset",
+        "Debug"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}/Appli"
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "Appli: Build Debug",
+      "type": "shell",
+      "command": "${env:ProgramFiles}/CMake/bin/cmake.exe",
+      "args": [
+        "--build",
+        "--preset",
+        "Debug"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}/Appli"
+      },
+      "dependsOn": "Appli: Configure Debug",
+      "dependsOrder": "sequence",
+      "group": "build",
+      "problemMatcher": [
+        "$gcc"
+      ]
+    },
+    {
+      "label": "FSBL: Configure Debug",
+      "type": "shell",
+      "command": "${env:ProgramFiles}/CMake/bin/cmake.exe",
+      "args": [
+        "--preset",
+        "Debug"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}/FSBL"
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "FSBL: Build Debug",
+      "type": "shell",
+      "command": "${env:ProgramFiles}/CMake/bin/cmake.exe",
+      "args": [
+        "--build",
+        "--preset",
+        "Debug"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}/FSBL"
+      },
+      "dependsOn": "FSBL: Configure Debug",
+      "dependsOrder": "sequence",
+      "problemMatcher": [
+        "$gcc"
+      ]
+    }
+  ]
+}

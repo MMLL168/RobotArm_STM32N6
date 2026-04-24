@@ -1,0 +1,47 @@
+[0.000] initConfigParams():  Configuration flags start
+[0.000] initConfigParams():   semihost-console-port          61236
+[0.000] initConfigParams():   semihosting                    "disabled"
+[0.000] initConfigParams():   external-init                  false
+[0.000] initConfigParams():   pend-halt-timeout              -1
+[0.000] initConfigParams():   halt                           false
+[0.000] initConfigParams():   config-file                    ""
+[0.000] initConfigParams():   persistent                     false
+[0.001] initConfigParams():  +log-file                       "D:\Work_202506\RobotArm\STM32N6\stlink_n6_attach.log"
+[0.001] initConfigParams():  +log-level                      31
+[0.001] initConfigParams():  +port-number                    50012
+[0.001] initConfigParams():   verbose                        false
+[0.001] initConfigParams():   refresh-delay                  15
+[0.001] initConfigParams():   target-sel                     ""
+[0.001] initConfigParams():   pcm-pm-force                   false
+[0.001] initConfigParams():   incremental                    false
+[0.001] initConfigParams():   verify                         false
+[0.001] initConfigParams():  +swd                            true
+[0.001] initConfigParams():   swo-port                       61234
+[0.001] initConfigParams():   cpu-clock                      8000000
+[0.001] initConfigParams():   swo-clock-div                  128
+[0.001] initConfigParams():   initialize-reset               false
+[0.001] initConfigParams():   debuggers                      false
+[0.001] initConfigParams():  +serial-number                  "002000313434511734313937"
+[0.001] initConfigParams():   apid                           0
+[0.001] initConfigParams():  +attach                         true
+[0.001] initConfigParams():   shared                         false
+[0.001] initConfigParams():   erase-all                      false
+[0.001] initConfigParams():   memory-map                     ""
+[0.001] initConfigParams():   ext-memory-loaders             false
+[0.001] initConfigParams():   extload_init                   (null)
+[0.001] initConfigParams():   extload                        (null)
+[0.001] initConfigParams():  +stm32cubeprogrammer-path       "C:\ST\STM32CubeIDE_1.18.1\STM32CubeIDE\plugins\com.st.stm32cube.ide.mcu.externaltools.cubeprogrammer.win32_2.2.400.202601091506\tools\bin"
+[0.001] initConfigParams():   temp-path                      ""
+[0.001] initConfigParams():   preserve-temps                 false
+[0.001] initConfigParams():   frequency                      0
+[0.001] initConfigParams():   licenses                       false
+[0.001] initConfigParams():   ignore-rest                    false
+[0.001] initConfigParams():   version                        false
+[0.001] initConfigParams():   help                           false
+[0.001] initConfigParams():  Configuration flags end
+[0.020] init():  STMicroelectronics ST-LINK GDB server. Version 7.13.0
+Copyright (c) 2026, STMicroelectronics. All rights reserved.
+[0.057] openDevice():  Device connect error
+[0.059] initServerContext():  
+Error in initializing ST-LINK device.
+Reason: [0.060] initServerContext():  Failed to connect to device. Please check power and cabling to target.

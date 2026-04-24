@@ -1,0 +1,63 @@
+[0.000] initConfigParams():  Configuration flags start
+[0.000] initConfigParams():   semihost-console-port          61236
+[0.000] initConfigParams():   semihosting                    "disabled"
+[0.000] initConfigParams():   external-init                  false
+[0.000] initConfigParams():   pend-halt-timeout              -1
+[0.000] initConfigParams():   halt                           false
+[0.001] initConfigParams():   config-file                    ""
+[0.001] initConfigParams():   persistent                     false
+[0.001] initConfigParams():  +log-file                       "D:\Work_202506\RobotArm\STM32N6\stlink_n6_attach_connect.log"
+[0.001] initConfigParams():  +log-level                      31
+[0.002] initConfigParams():  +port-number                    50013
+[0.002] initConfigParams():   verbose                        false
+[0.002] initConfigParams():   refresh-delay                  15
+[0.002] initConfigParams():   target-sel                     ""
+[0.002] initConfigParams():   pcm-pm-force                   false
+[0.002] initConfigParams():   incremental                    false
+[0.002] initConfigParams():   verify                         false
+[0.002] initConfigParams():  +swd                            true
+[0.002] initConfigParams():   swo-port                       61234
+[0.002] initConfigParams():   cpu-clock                      8000000
+[0.002] initConfigParams():   swo-clock-div                  128
+[0.003] initConfigParams():   initialize-reset               false
+[0.003] initConfigParams():   debuggers                      false
+[0.003] initConfigParams():  +serial-number                  "002000313434511734313937"
+[0.003] initConfigParams():   apid                           0
+[0.003] initConfigParams():  +attach                         true
+[0.003] initConfigParams():   shared                         false
+[0.003] initConfigParams():   erase-all                      false
+[0.003] initConfigParams():   memory-map                     ""
+[0.003] initConfigParams():   ext-memory-loaders             false
+[0.003] initConfigParams():   extload_init                   (null)
+[0.003] initConfigParams():   extload                        (null)
+[0.003] initConfigParams():  +stm32cubeprogrammer-path       "C:\ST\STM32CubeIDE_1.18.1\STM32CubeIDE\plugins\com.st.stm32cube.ide.mcu.externaltools.cubeprogrammer.win32_2.2.400.202601091506\tools\bin"
+[0.003] initConfigParams():   temp-path                      ""
+[0.003] initConfigParams():   preserve-temps                 false
+[0.003] initConfigParams():   frequency                      0
+[0.003] initConfigParams():   licenses                       false
+[0.003] initConfigParams():   ignore-rest                    false
+[0.003] initConfigParams():   version                        false
+[0.003] initConfigParams():   help                           false
+[0.003] initConfigParams():  Configuration flags end
+[0.021] init():  STMicroelectronics ST-LINK GDB server. Version 7.13.0
+Copyright (c) 2026, STMicroelectronics. All rights reserved.
+[0.060] openDevice():  COM frequency = 24000 kHz
+[0.061] openDevice():  Target connection mode: Attach
+[0.064] readFromTarget():  Reading ROM table for AP 0 @0x80000fd0
+[0.066] reset_hw_wtchpt_module():  Hardware watchpoint supported by the target 
+[0.069] initContext():  ST-LINK Firmware version : V3J17M10
+[0.070] initContext():  Device ID: 0x486
+[0.070] initContext():  PC: 0x0
+[0.072] Device_GetStatus():  ST-LINK device status: RUN_MODE
+[0.073] initContext():  ST-LINK detects target voltage = 3.27 V
+[0.074] initContext():  ST-LINK device status: RUN_MODE
+[0.076] initServerContext():  ST-LINK device initialization OK
+[0.079] pollAndNotifyRun():  Stm32Device, pollAndNotify running...
+[0.084] updateState():  SwvSrv state change: 0 -> 1
+[0.086] WaitConnection():  Waiting for connection on port 50014...
+[0.088] WaitConnection():  Waiting for connection on port 50013...
+[25.349] WaitConnection():  Accepted connection on port 50013...
+[25.350] haltOnConnect():  Try halt...
+[26.803] createSession():  Session manager. Fail starting session.
+[26.804] run():  GDB server. Fail create session.
+[26.806] WaitConnection():  Waiting for connection on port 50013...
