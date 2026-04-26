@@ -40,6 +40,16 @@ STARTUP_PREVIEW_SHOULDER_DEG = 60.0
 STARTUP_PREVIEW_GRIPPER_DEG = -30.0
 SAFE_WORKSPACE_MIN_Z_MM = 0.0
 SAFE_WORKSPACE_SAMPLES_PER_JOINT = 25
+WORKSPACE_PREVIEW_SAMPLES_PER_JOINT = 17
+WORKSPACE_PREVIEW_QUANTIZATION_MM = 6.0
+WORKSPACE_CLICK_PICK_RADIUS_PX = 28.0
+WORKSPACE_VIEW_DEFAULT_AZIMUTH_DEG = 0.0
+WORKSPACE_VIEW_DEFAULT_ELEVATION = 0.28
+WORKSPACE_VIEW_MIN_ELEVATION = 0.18
+WORKSPACE_VIEW_MAX_ELEVATION = 0.82
+WORKSPACE_PREVIEW_EASING = 0.3
+WORKSPACE_AXIS_GUIDE_RATIO = 0.42
+WORKSPACE_PROJECTION_PADDING_RATIO = 0.08
 
 PREVIEW_CANVAS_WIDTH = 560
 PREVIEW_CANVAS_HEIGHT = 360
@@ -79,8 +89,12 @@ class RobotArmDebugGui(tk.Tk):
         self.geometry("1280x820")
         self.minsize(900, 620)
 
+        self._workspace_view_azimuth_deg = WORKSPACE_VIEW_DEFAULT_AZIMUTH_DEG
+        self._workspace_view_elevation = WORKSPACE_VIEW_DEFAULT_ELEVATION
         self.workspace_bounds = self._estimate_workspace_bounds()
         self.preview_bounds = self._estimate_preview_bounds()
+        self.workspace_preview_points = self._sample_workspace_preview_points()
+        self.workspace_projection_bounds = self._estimate_workspace_projection_bounds(self.workspace_preview_points)
         default_x_mm = self._guide_axis_midpoint("x")
         default_y_mm = self._guide_axis_midpoint("y")
         default_z_mm = self._guide_axis_midpoint("z")
@@ -102,7 +116,7 @@ class RobotArmDebugGui(tk.Tk):
         self.pose_summary_var = tk.StringVar(value="Local pose estimate pending")
         self.target_summary_var = tk.StringVar(value=f"Local target x={default_x_mm} y={default_y_mm} z={default_z_mm} mm")
         self.preview_legend_var = tk.StringVar(
-            value="Orange shoulder housing = Fore front/back joint. Blue elbow housing = Gripper up/down joint. Pink marker = XYZ target."
+            value="Orange shoulder housing = Fore front/back joint. Blue elbow housing = Gripper up/down joint. Cyan cloud = reachable 3D workspace. Left-hold previews a move, release sends it, right-drag rotates the view."
         )
         self.x_range_var = tk.StringVar(value=self._format_axis_range_text("x"))
         self.y_range_var = tk.StringVar(value=self._format_axis_range_text("y"))
@@ -135,6 +149,16 @@ class RobotArmDebugGui(tk.Tk):
         self.preview_frame = None
         self.command_layout_mode = None
         self._last_preview_canvas_size = (0, 0)
+        self._workspace_click_candidates = []
+        self._workspace_panel_bounds = None
+        self._workspace_hover_target = None
+        self._workspace_drag_active = False
+        self._workspace_drag_target = None
+        self._workspace_rotate_active = False
+        self._workspace_rotate_last_pointer = None
+        self._workspace_preview_joint_angles = None
+        self._workspace_preview_target_angles = None
+        self._workspace_preview_after_id = None
         self._suspend_preview_updates = False
         self._initial_preview_joint_angles = self._create_initial_preview_joint_angles()
 
@@ -263,6 +287,14 @@ class RobotArmDebugGui(tk.Tk):
         )
         self.preview_canvas.grid(row=0, column=0, sticky="nsew", padx=8, pady=(8, 4))
         self.preview_canvas.bind("<Configure>", self._handle_preview_canvas_configure)
+        self.preview_canvas.bind("<Motion>", self._handle_preview_pointer_motion)
+        self.preview_canvas.bind("<Leave>", self._handle_preview_pointer_leave)
+        self.preview_canvas.bind("<ButtonPress-1>", self._handle_preview_left_press)
+        self.preview_canvas.bind("<B1-Motion>", self._handle_preview_left_drag)
+        self.preview_canvas.bind("<ButtonRelease-1>", self._handle_preview_left_release)
+        self.preview_canvas.bind("<ButtonPress-3>", self._handle_preview_right_press)
+        self.preview_canvas.bind("<B3-Motion>", self._handle_preview_right_drag)
+        self.preview_canvas.bind("<ButtonRelease-3>", self._handle_preview_right_release)
         ttk.Label(self.preview_frame, textvariable=self.preview_legend_var, wraplength=492, justify="left", font=("Segoe UI", 9)).grid(
             row=1, column=0, sticky="ew", padx=8, pady=(0, 2)
         )
@@ -340,6 +372,138 @@ class RobotArmDebugGui(tk.Tk):
 
         self.after_idle(self._update_preview)
 
+    def _is_pointer_in_workspace_panel(self, pointer_x: float, pointer_y: float) -> bool:
+        if self._workspace_panel_bounds is None:
+            return False
+
+        left, top, right, bottom = self._workspace_panel_bounds
+        return left <= pointer_x <= right and top <= pointer_y <= bottom
+
+    def _pick_workspace_target(self, pointer_x: float, pointer_y: float, max_distance_px: float | None) -> tuple[int, int, int] | None:
+        if not self._workspace_click_candidates:
+            return None
+
+        closest_target = None
+        closest_distance_sq = float("inf")
+        for screen_x, screen_y, target in self._workspace_click_candidates:
+            distance_sq = ((screen_x - pointer_x) * (screen_x - pointer_x)) + ((screen_y - pointer_y) * (screen_y - pointer_y))
+            if distance_sq < closest_distance_sq:
+                closest_distance_sq = distance_sq
+                closest_target = target
+
+        if closest_target is None:
+            return None
+        if max_distance_px is not None and closest_distance_sq > (max_distance_px * max_distance_px):
+            return None
+        return closest_target
+
+    def _handle_preview_pointer_motion(self, event) -> None:
+        if self._workspace_drag_active or self._workspace_rotate_active:
+            return
+
+        hover_target = None
+        if self._is_pointer_in_workspace_panel(event.x, event.y):
+            hover_target = self._pick_workspace_target(event.x, event.y, max_distance_px=WORKSPACE_CLICK_PICK_RADIUS_PX)
+
+        if hover_target == self._workspace_hover_target:
+            return
+
+        self._workspace_hover_target = hover_target
+        self._update_preview()
+
+    def _handle_preview_pointer_leave(self, _event) -> None:
+        if self._workspace_drag_active or self._workspace_rotate_active:
+            return
+        if self._workspace_hover_target is None:
+            return
+
+        self._workspace_hover_target = None
+        self._update_preview()
+
+    def _handle_preview_left_press(self, event) -> None:
+        if not self._is_pointer_in_workspace_panel(event.x, event.y):
+            return
+
+        closest_target = self._pick_workspace_target(event.x, event.y, max_distance_px=WORKSPACE_CLICK_PICK_RADIUS_PX)
+        if closest_target is None:
+            self.preview_mode_var.set("3D workspace press missed the reachable cloud. Hold on a cyan point to preview a move.")
+            return
+
+        self._workspace_drag_active = True
+        self._workspace_drag_target = closest_target
+        self._workspace_hover_target = closest_target
+        self._preview_workspace_target(closest_target)
+
+    def _handle_preview_left_drag(self, event) -> None:
+        if not self._workspace_drag_active:
+            return
+        if not self._is_pointer_in_workspace_panel(event.x, event.y):
+            return
+
+        closest_target = self._pick_workspace_target(event.x, event.y, max_distance_px=None)
+        if closest_target is None:
+            return
+        if closest_target == self._workspace_drag_target:
+            return
+
+        self._workspace_drag_target = closest_target
+        self._workspace_hover_target = closest_target
+        self._preview_workspace_target(closest_target)
+
+    def _handle_preview_left_release(self, event) -> None:
+        if not self._workspace_drag_active:
+            return
+
+        if self._is_pointer_in_workspace_panel(event.x, event.y):
+            closest_target = self._pick_workspace_target(event.x, event.y, max_distance_px=None)
+            if closest_target is not None and closest_target != self._workspace_drag_target:
+                self._workspace_drag_target = closest_target
+                self._workspace_hover_target = closest_target
+                self._preview_workspace_target(closest_target)
+
+        selected_target = self._workspace_drag_target
+        self._workspace_drag_active = False
+        self._workspace_drag_target = None
+        if selected_target is None:
+            self._cancel_workspace_preview_animation(clear_override=True)
+            self._update_preview()
+            return
+
+        self._select_workspace_target(selected_target, auto_send=self.serial_port is not None)
+
+    def _handle_preview_right_press(self, event) -> None:
+        if not self._is_pointer_in_workspace_panel(event.x, event.y):
+            return
+
+        self._workspace_rotate_active = True
+        self._workspace_rotate_last_pointer = (event.x, event.y)
+        self._workspace_hover_target = None
+
+    def _handle_preview_right_drag(self, event) -> None:
+        if not self._workspace_rotate_active or self._workspace_rotate_last_pointer is None:
+            return
+
+        last_x, last_y = self._workspace_rotate_last_pointer
+        delta_x = event.x - last_x
+        delta_y = event.y - last_y
+        if delta_x == 0 and delta_y == 0:
+            return
+
+        self._workspace_rotate_last_pointer = (event.x, event.y)
+        self._workspace_view_azimuth_deg += delta_x * 0.45
+        self._workspace_view_elevation = max(
+            WORKSPACE_VIEW_MIN_ELEVATION,
+            min(WORKSPACE_VIEW_MAX_ELEVATION, self._workspace_view_elevation - (delta_y * 0.004)),
+        )
+        self.preview_mode_var.set(
+            f"3D workspace orbit azimuth={self._workspace_view_azimuth_deg:.0f} deg tilt={self._workspace_view_elevation:.2f}"
+        )
+        self._update_preview()
+
+    def _handle_preview_right_release(self, _event) -> None:
+        self._workspace_rotate_active = False
+        self._workspace_rotate_last_pointer = None
+
     def _apply_command_layout(self, layout_mode: str) -> None:
         if self.command_frame is None or self.xyz_frame is None or self.pwm_frame is None or self.preview_frame is None:
             return
@@ -410,6 +574,9 @@ class RobotArmDebugGui(tk.Tk):
         if self._suspend_preview_updates:
             return
 
+        self._workspace_drag_active = False
+        self._workspace_drag_target = None
+        self._cancel_workspace_preview_animation(clear_override=True)
         self.preview_mode_var.set("Local preview follows manual PWM sliders.")
         self._update_preview()
 
@@ -601,6 +768,60 @@ class RobotArmDebugGui(tk.Tk):
     def _use_live_preview(self) -> None:
         self._initial_preview_joint_angles = None
 
+    def _display_joint_angles(self) -> tuple[float, float, float]:
+        if self._workspace_preview_joint_angles is not None:
+            return self._workspace_preview_joint_angles
+        if self._initial_preview_joint_angles is not None:
+            return self._initial_preview_joint_angles
+        return self._current_joint_angles()
+
+    def _cancel_workspace_preview_animation(self, clear_override: bool) -> None:
+        if self._workspace_preview_after_id is not None:
+            self.after_cancel(self._workspace_preview_after_id)
+            self._workspace_preview_after_id = None
+
+        self._workspace_preview_target_angles = None
+        if clear_override:
+            self._workspace_preview_joint_angles = None
+
+    def _animate_workspace_preview(self) -> None:
+        self._workspace_preview_after_id = None
+        if self._workspace_preview_joint_angles is None or self._workspace_preview_target_angles is None:
+            return
+
+        next_angles = []
+        has_remaining_delta = False
+        for current_angle, target_angle in zip(self._workspace_preview_joint_angles, self._workspace_preview_target_angles):
+            delta = target_angle - current_angle
+            if abs(delta) <= 0.002:
+                next_angles.append(target_angle)
+                continue
+
+            next_angles.append(current_angle + (delta * WORKSPACE_PREVIEW_EASING))
+            has_remaining_delta = True
+
+        self._workspace_preview_joint_angles = tuple(next_angles)
+        self._update_preview()
+        if has_remaining_delta:
+            self._workspace_preview_after_id = self.after(16, self._animate_workspace_preview)
+
+    def _preview_workspace_target(self, target: tuple[int, int, int]) -> None:
+        solution = self._solve_safe_ik(target[0], target[1], target[2])
+        if solution is None:
+            self.preview_mode_var.set("3D workspace preview skipped because this sampled point is no longer solvable.")
+            return
+
+        self._use_live_preview()
+        self._set_xyz_values(target[0], target[1], target[2])
+        if self._workspace_preview_joint_angles is None:
+            self._workspace_preview_joint_angles = self._display_joint_angles()
+        self._workspace_preview_target_angles = solution
+        self.preview_mode_var.set(
+            f"3D workspace preview x={target[0]} y={target[1]} z={target[2]} mm | hold to scrub, release to send"
+        )
+        if self._workspace_preview_after_id is None:
+            self._animate_workspace_preview()
+
     def _map_value(self, value: float, source_minimum: float, source_maximum: float, target_minimum: float, target_maximum: float) -> float:
         if source_maximum <= source_minimum:
             return target_minimum
@@ -717,6 +938,93 @@ class RobotArmDebugGui(tk.Tk):
             bounds["min_z"] = SAFE_WORKSPACE_MIN_Z_MM
 
         return bounds
+
+    def _sample_workspace_preview_points(self) -> list[tuple[int, int, int]]:
+        yaw_limits, shoulder_limits, gripper_limits = self._safe_joint_limits()
+        sampled_points: dict[tuple[int, int, int], tuple[int, int, int]] = {}
+
+        def sample_value(minimum: float, maximum: float, index: int) -> float:
+            if WORKSPACE_PREVIEW_SAMPLES_PER_JOINT <= 1:
+                return minimum
+            return minimum + ((maximum - minimum) * index / (WORKSPACE_PREVIEW_SAMPLES_PER_JOINT - 1))
+
+        for yaw_index in range(WORKSPACE_PREVIEW_SAMPLES_PER_JOINT):
+            yaw_rad = sample_value(yaw_limits[0], yaw_limits[1], yaw_index)
+            for shoulder_index in range(WORKSPACE_PREVIEW_SAMPLES_PER_JOINT):
+                shoulder_rad = sample_value(shoulder_limits[0], shoulder_limits[1], shoulder_index)
+                for gripper_index in range(WORKSPACE_PREVIEW_SAMPLES_PER_JOINT):
+                    gripper_rad = sample_value(gripper_limits[0], gripper_limits[1], gripper_index)
+                    pose = self._forward_pose(yaw_rad, shoulder_rad, gripper_rad)
+                    if pose["z"] < SAFE_WORKSPACE_MIN_Z_MM:
+                        continue
+
+                    rounded_point = (
+                        int(round(pose["x"])),
+                        int(round(pose["y"])),
+                        int(round(pose["z"])),
+                    )
+                    if self._solve_safe_ik(*rounded_point) is None:
+                        continue
+                    quantized_key = (
+                        int(round(rounded_point[0] / WORKSPACE_PREVIEW_QUANTIZATION_MM)),
+                        int(round(rounded_point[1] / WORKSPACE_PREVIEW_QUANTIZATION_MM)),
+                        int(round(rounded_point[2] / WORKSPACE_PREVIEW_QUANTIZATION_MM)),
+                    )
+                    sampled_points[quantized_key] = rounded_point
+
+        points = list(sampled_points.values())
+        points.sort(key=lambda point: (point[2], point[0] + point[1], point[0]))
+        return points
+
+    def _project_workspace_point(self, x_mm: float, y_mm: float, z_mm: float) -> tuple[float, float]:
+        azimuth_rad = self._degrees_to_radians(self._workspace_view_azimuth_deg)
+        projected_x = (x_mm * math.sin(azimuth_rad)) - (y_mm * math.cos(azimuth_rad))
+        forward_depth = (x_mm * math.cos(azimuth_rad)) + (y_mm * math.sin(azimuth_rad))
+        projected_y = z_mm - (forward_depth * self._workspace_view_elevation)
+        return projected_x, projected_y
+
+    def _estimate_workspace_projection_bounds(self, points: list[tuple[int, int, int]]) -> dict[str, float]:
+        projection_bounds = {
+            "min_x": 0.0,
+            "max_x": 0.0,
+            "min_y": 0.0,
+            "max_y": 0.0,
+        }
+        has_projection = False
+
+        anchor_points = list(points)
+        anchor_points.extend(
+            [
+                (0, 0, 0),
+                (int(round(self.workspace_bounds["max_radius"] * WORKSPACE_AXIS_GUIDE_RATIO)), 0, 0),
+                (0, int(round(self.workspace_bounds["max_radius"] * WORKSPACE_AXIS_GUIDE_RATIO)), 0),
+                (0, 0, int(round(self.workspace_bounds["max_z"] * WORKSPACE_AXIS_GUIDE_RATIO))),
+            ]
+        )
+
+        for x_mm, y_mm, z_mm in anchor_points:
+            projected_x, projected_y = self._project_workspace_point(x_mm, y_mm, z_mm)
+            if not has_projection:
+                projection_bounds["min_x"] = projected_x
+                projection_bounds["max_x"] = projected_x
+                projection_bounds["min_y"] = projected_y
+                projection_bounds["max_y"] = projected_y
+                has_projection = True
+                continue
+
+            projection_bounds["min_x"] = min(projection_bounds["min_x"], projected_x)
+            projection_bounds["max_x"] = max(projection_bounds["max_x"], projected_x)
+            projection_bounds["min_y"] = min(projection_bounds["min_y"], projected_y)
+            projection_bounds["max_y"] = max(projection_bounds["max_y"], projected_y)
+
+        padding_x = max(8.0, (projection_bounds["max_x"] - projection_bounds["min_x"]) * WORKSPACE_PROJECTION_PADDING_RATIO)
+        padding_y = max(8.0, (projection_bounds["max_y"] - projection_bounds["min_y"]) * WORKSPACE_PROJECTION_PADDING_RATIO)
+        projection_bounds["min_x"] -= padding_x
+        projection_bounds["max_x"] += padding_x
+        projection_bounds["min_y"] -= padding_y
+        projection_bounds["max_y"] += padding_y
+
+        return projection_bounds
 
     def _format_axis_range_text(self, axis_name: str) -> str:
         minimum, maximum = self._guide_axis_bounds(axis_name)
@@ -840,11 +1148,39 @@ class RobotArmDebugGui(tk.Tk):
             return None
         return x_mm, y_mm, z_mm
 
+    def _set_xyz_values(self, x_mm: int, y_mm: int, z_mm: int) -> None:
+        self._suspend_preview_updates = True
+        self.x_var.set(str(x_mm))
+        self.y_var.set(str(y_mm))
+        self.z_var.set(str(z_mm))
+        self._suspend_preview_updates = False
+        self._update_xyz_entry_states()
+        self._refresh_xyz_validation_state()
+
+    def _select_workspace_target(self, target: tuple[int, int, int], auto_send: bool) -> None:
+        solution = self._solve_safe_ik(target[0], target[1], target[2])
+        if solution is None:
+            self.preview_mode_var.set("3D workspace release hit a point that local IK can no longer solve safely.")
+            self._cancel_workspace_preview_animation(clear_override=True)
+            self._update_preview()
+            return
+
+        self._use_live_preview()
+        self._cancel_workspace_preview_animation(clear_override=True)
+        self._set_xyz_values(target[0], target[1], target[2])
+        if auto_send:
+            self.preview_mode_var.set(f"3D workspace selected x={target[0]} y={target[1]} z={target[2]} mm | sending XYZ")
+            self.send_xyz_command()
+            return
+
+        left_right_pulse, fore_aft_pulse, gripper_lift_pulse = self._angles_to_pwm(*solution)
+        self._set_pwm_values(self.clamp_var.get(), fore_aft_pulse, gripper_lift_pulse, left_right_pulse)
+        self.preview_mode_var.set(
+            f"3D workspace selected x={target[0]} y={target[1]} z={target[2]} mm | connect serial or press Send XYZ to move"
+        )
+
     def _update_preview(self) -> None:
-        if self._initial_preview_joint_angles is not None:
-            yaw_rad, shoulder_rad, gripper_rad = self._initial_preview_joint_angles
-        else:
-            yaw_rad, shoulder_rad, gripper_rad = self._current_joint_angles()
+        yaw_rad, shoulder_rad, gripper_rad = self._display_joint_angles()
         pose = self._forward_pose(yaw_rad, shoulder_rad, gripper_rad)
         target = self._current_target()
 
@@ -862,6 +1198,8 @@ class RobotArmDebugGui(tk.Tk):
     def _draw_preview(self, pose: dict[str, float], target: tuple[int, int, int] | None, yaw_rad: float) -> None:
         canvas = self.preview_canvas
         canvas.delete("all")
+        self._workspace_click_candidates = []
+        self._workspace_panel_bounds = None
 
         width = canvas.winfo_width()
         height = canvas.winfo_height()
@@ -1081,55 +1419,134 @@ class RobotArmDebugGui(tk.Tk):
             canvas.create_line(target_x - 16, target_y, target_x + 16, target_y, fill="#ff6f91", width=2)
             canvas.create_line(target_x, target_y - 16, target_x, target_y + 16, fill="#ff6f91", width=2)
 
-        radar_left = content_left + 392
-        radar_top = content_top + 32
-        radar_right = content_left + PREVIEW_CANVAS_WIDTH - 20
-        radar_bottom = content_top + PREVIEW_CANVAS_HEIGHT - 34
-        radar_width = radar_right - radar_left
-        radar_height = radar_bottom - radar_top
-        radar_radius = int(min((radar_width - 34) * 0.5, (radar_height - 150) * 0.5, 64))
-        radar_center_x = (radar_left + radar_right) * 0.5
-        radar_center_y = radar_top + radar_radius + 44
-        radar_text_width = radar_width - 28
-        canvas.create_rectangle(radar_left, radar_top, radar_right, radar_bottom, fill="#0d1628", outline="#233a57", width=2)
-        canvas.create_text(radar_left + 14, radar_top + 18, anchor="w", text="Yaw / Reach", fill="#d8f3ff", font=("Segoe UI", 10, "bold"))
+        workspace_left = side_right + 22
+        workspace_top = content_top + 32
+        workspace_right = width - 20
+        workspace_bottom = content_top + PREVIEW_CANVAS_HEIGHT - 34
+        workspace_width = workspace_right - workspace_left
+        workspace_height = workspace_bottom - workspace_top
+        workspace_text_width = workspace_width - 28
+        self._workspace_panel_bounds = (workspace_left, workspace_top, workspace_right, workspace_bottom)
+        canvas.create_rectangle(workspace_left, workspace_top, workspace_right, workspace_bottom, fill="#0d1628", outline="#233a57", width=2)
+        canvas.create_text(workspace_left + 14, workspace_top + 18, anchor="w", text="3D Workspace", fill="#d8f3ff", font=("Segoe UI", 10, "bold"))
+        canvas.create_text(
+            workspace_left + 14,
+            workspace_top + 36,
+            anchor="w",
+            text="Hover shows nearest XYZ. Left-hold previews smoothly and release sends. Right-drag rotates the 3D view.",
+            fill="#8bcfff",
+            font=("Segoe UI", 8),
+            width=workspace_text_width,
+        )
 
-        canvas.create_oval(radar_center_x - radar_radius, radar_center_y - radar_radius, radar_center_x + radar_radius, radar_center_y + radar_radius, outline="#29517a", width=2)
-        canvas.create_oval(radar_center_x - (radar_radius * 0.64), radar_center_y - (radar_radius * 0.64), radar_center_x + (radar_radius * 0.64), radar_center_y + (radar_radius * 0.64), outline="#20415f")
-        canvas.create_oval(radar_center_x - (radar_radius * 0.28), radar_center_y - (radar_radius * 0.28), radar_center_x + (radar_radius * 0.28), radar_center_y + (radar_radius * 0.28), outline="#20415f")
-        canvas.create_line(radar_center_x - radar_radius, radar_center_y, radar_center_x + radar_radius, radar_center_y, fill="#20415f")
-        canvas.create_line(radar_center_x, radar_center_y - radar_radius, radar_center_x, radar_center_y + radar_radius, fill="#20415f")
+        workspace_plot_left = workspace_left + 14
+        workspace_plot_top = workspace_top + 58
+        workspace_plot_right = workspace_right - 14
+        workspace_plot_bottom = workspace_bottom - 84
+        workspace_plot_width = workspace_plot_right - workspace_plot_left
+        workspace_plot_height = workspace_plot_bottom - workspace_plot_top
+        self.workspace_projection_bounds = self._estimate_workspace_projection_bounds(self.workspace_preview_points)
+        projected_bounds = self.workspace_projection_bounds
+        projected_width = projected_bounds["max_x"] - projected_bounds["min_x"]
+        projected_height = projected_bounds["max_y"] - projected_bounds["min_y"]
+        workspace_scale = min(workspace_plot_width / projected_width, workspace_plot_height / projected_height)
+        render_width = projected_width * workspace_scale
+        render_height = projected_height * workspace_scale
+        render_left = workspace_plot_left + ((workspace_plot_width - render_width) * 0.5)
+        render_top = workspace_plot_top + ((workspace_plot_height - render_height) * 0.5)
 
-        radar_scale = radar_radius / 250.0
-        actual_radar_x = radar_center_x + (pose["x"] * radar_scale)
-        actual_radar_y = radar_center_y - (pose["y"] * radar_scale)
-        canvas.create_line(radar_center_x, radar_center_y, actual_radar_x, actual_radar_y, fill="#6be0ff", width=5, capstyle=tk.ROUND)
-        canvas.create_oval(actual_radar_x - 8, actual_radar_y - 8, actual_radar_x + 8, actual_radar_y + 8, fill="#ffe082", outline="#fff8d0")
+        def workspace_screen_point(x_mm: float, y_mm: float, z_mm: float) -> tuple[float, float]:
+            projected_x, projected_y = self._project_workspace_point(x_mm, y_mm, z_mm)
+            screen_x = render_left + ((projected_x - projected_bounds["min_x"]) * workspace_scale)
+            screen_y = render_top + render_height - ((projected_y - projected_bounds["min_y"]) * workspace_scale)
+            return screen_x, screen_y
+
+        origin_x, origin_y = workspace_screen_point(0.0, 0.0, 0.0)
+        axis_guide_radius_mm = self.workspace_bounds["max_radius"] * WORKSPACE_AXIS_GUIDE_RATIO
+        axis_guide_height_mm = self.workspace_bounds["max_z"] * WORKSPACE_AXIS_GUIDE_RATIO
+        x_axis_end_x, x_axis_end_y = workspace_screen_point(axis_guide_radius_mm, 0.0, 0.0)
+        y_axis_end_x, y_axis_end_y = workspace_screen_point(0.0, axis_guide_radius_mm, 0.0)
+        z_axis_end_x, z_axis_end_y = workspace_screen_point(0.0, 0.0, axis_guide_height_mm)
+
+        canvas.create_line(origin_x, origin_y, x_axis_end_x, x_axis_end_y, fill="#5fd0ff", width=2)
+        canvas.create_line(origin_x, origin_y, y_axis_end_x, y_axis_end_y, fill="#4da3ff", width=2)
+        canvas.create_line(origin_x, origin_y, z_axis_end_x, z_axis_end_y, fill="#9de37d", width=2)
+        canvas.create_text(x_axis_end_x + 6, x_axis_end_y, anchor="w", text="X", fill="#5fd0ff", font=("Segoe UI", 8, "bold"))
+        canvas.create_text(y_axis_end_x - 6, y_axis_end_y, anchor="e", text="Y", fill="#4da3ff", font=("Segoe UI", 8, "bold"))
+        canvas.create_text(z_axis_end_x, z_axis_end_y - 8, anchor="s", text="Z", fill="#9de37d", font=("Segoe UI", 8, "bold"))
+
+        hover_workspace_x = None
+        hover_workspace_y = None
+        drag_workspace_x = None
+        drag_workspace_y = None
+        for workspace_point in self.workspace_preview_points:
+            point_x, point_y = workspace_screen_point(float(workspace_point[0]), float(workspace_point[1]), float(workspace_point[2]))
+            depth_ratio = 0.0
+            if self.workspace_bounds["max_z"] > SAFE_WORKSPACE_MIN_Z_MM:
+                depth_ratio = (workspace_point[2] - SAFE_WORKSPACE_MIN_Z_MM) / (self.workspace_bounds["max_z"] - SAFE_WORKSPACE_MIN_Z_MM)
+            point_color = "#43d3ff" if depth_ratio < 0.5 else "#8bf7ff"
+            point_radius = 2.0 if depth_ratio < 0.7 else 2.6
+            canvas.create_oval(point_x - point_radius, point_y - point_radius, point_x + point_radius, point_y + point_radius, fill=point_color, outline="")
+            if self._workspace_hover_target == workspace_point:
+                hover_workspace_x = point_x
+                hover_workspace_y = point_y
+            if self._workspace_drag_target == workspace_point:
+                drag_workspace_x = point_x
+                drag_workspace_y = point_y
+            self._workspace_click_candidates.append((point_x, point_y, workspace_point))
+
+        if hover_workspace_x is not None and hover_workspace_y is not None:
+            canvas.create_oval(hover_workspace_x - 6, hover_workspace_y - 6, hover_workspace_x + 6, hover_workspace_y + 6, outline="#ffffff", width=1)
+
+        if drag_workspace_x is not None and drag_workspace_y is not None:
+            canvas.create_oval(drag_workspace_x - 9, drag_workspace_y - 9, drag_workspace_x + 9, drag_workspace_y + 9, outline="#ff9f6b", width=2)
+            canvas.create_line(drag_workspace_x - 12, drag_workspace_y, drag_workspace_x + 12, drag_workspace_y, fill="#ff9f6b", width=2)
+            canvas.create_line(drag_workspace_x, drag_workspace_y - 12, drag_workspace_x, drag_workspace_y + 12, fill="#ff9f6b", width=2)
+
+        actual_workspace_x, actual_workspace_y = workspace_screen_point(pose["x"], pose["y"], pose["z"])
+        canvas.create_line(origin_x, origin_y, actual_workspace_x, actual_workspace_y, fill="#ffe082", width=3, capstyle=tk.ROUND)
+        canvas.create_oval(actual_workspace_x - 6, actual_workspace_y - 6, actual_workspace_x + 6, actual_workspace_y + 6, fill="#ffe082", outline="#fff8d0")
 
         if target is not None:
-            target_radar_x = radar_center_x + (target[0] * radar_scale)
-            target_radar_y = radar_center_y - (target[1] * radar_scale)
-            canvas.create_oval(target_radar_x - 9, target_radar_y - 9, target_radar_x + 9, target_radar_y + 9, outline="#ff5b8f", width=3)
-            canvas.create_line(target_radar_x - 13, target_radar_y, target_radar_x + 13, target_radar_y, fill="#ff5b8f", width=2)
-            canvas.create_line(target_radar_x, target_radar_y - 13, target_radar_x, target_radar_y + 13, fill="#ff5b8f", width=2)
+            target_workspace_x, target_workspace_y = workspace_screen_point(float(target[0]), float(target[1]), float(target[2]))
+            canvas.create_oval(target_workspace_x - 8, target_workspace_y - 8, target_workspace_x + 8, target_workspace_y + 8, outline="#ff5b8f", width=3)
+            canvas.create_line(target_workspace_x - 12, target_workspace_y, target_workspace_x + 12, target_workspace_y, fill="#ff5b8f", width=2)
+            canvas.create_line(target_workspace_x, target_workspace_y - 12, target_workspace_x, target_workspace_y + 12, fill="#ff5b8f", width=2)
 
         canvas.create_text(
-            radar_left + 14,
-            radar_bottom - 98,
+            workspace_left + 14,
+            workspace_bottom - 78,
             anchor="nw",
-            text=f"Yaw {math.degrees(yaw_rad):.0f} deg",
+            text=f"Actual x={pose['x']:.0f} y={pose['y']:.0f} z={pose['z']:.0f} mm",
             fill="#a9dcff",
             font=("Segoe UI", 10, "bold"),
-            width=radar_text_width,
+            width=workspace_text_width,
         )
         canvas.create_text(
-            radar_left + 14,
-            radar_bottom - 72,
+            workspace_left + 14,
+            workspace_bottom - 54,
             anchor="nw",
-            text=f"Clamp {self.clamp_var.get()} us | Reach {pose['radial']:.0f} mm",
+            text=(
+                f"Preview target x={target[0]} y={target[1]} z={target[2]} mm"
+                if target is not None
+                else f"Yaw {math.degrees(yaw_rad):.0f} deg | Reach {pose['radial']:.0f} mm"
+            ),
             fill="#c8dcf4",
             font=("Segoe UI", 9),
-            width=radar_text_width,
+            width=workspace_text_width,
+        )
+        canvas.create_text(
+            workspace_left + 14,
+            workspace_bottom - 30,
+            anchor="nw",
+            text=(
+                f"Hover x={self._workspace_hover_target[0]} y={self._workspace_hover_target[1]} z={self._workspace_hover_target[2]} mm"
+                if self._workspace_hover_target is not None
+                else "Hover a cyan point | left-hold preview | release send | right-drag orbit"
+            ),
+            fill="#8bcfff",
+            font=("Segoe UI", 8),
+            width=workspace_text_width,
         )
 
     def refresh_ports(self) -> None:
@@ -1390,12 +1807,18 @@ class RobotArmDebugGui(tk.Tk):
             )
 
     def send_home_command(self) -> None:
+        self._workspace_drag_active = False
+        self._workspace_drag_target = None
+        self._cancel_workspace_preview_animation(clear_override=True)
         self.load_startup_pwm()
         self.preview_mode_var.set("Local preview reset to the firmware HOME midpoint pose.")
         self._set_fw_command_feedback("FW command result: waiting for HOME acknowledgement", "FW echo: host sent HOME", tone="waiting")
         self.send_command("HOME")
 
     def send_xyz_command(self) -> None:
+        self._workspace_drag_active = False
+        self._workspace_drag_target = None
+        self._cancel_workspace_preview_animation(clear_override=True)
         input_issues = self._describe_current_xyz_input_issues()
         if input_issues:
             blocked_message = "XYZ send blocked: " + " | ".join(input_issues)
@@ -1439,6 +1862,9 @@ class RobotArmDebugGui(tk.Tk):
         self.send_command(f"XYZ {target[0]} {target[1]} {target[2]}")
 
     def send_pwm_command(self) -> None:
+        self._workspace_drag_active = False
+        self._workspace_drag_target = None
+        self._cancel_workspace_preview_animation(clear_override=True)
         self._use_live_preview()
         self.preview_mode_var.set("Local preview mirrors the PWM command about to be sent.")
         self._update_preview()
@@ -1453,6 +1879,9 @@ class RobotArmDebugGui(tk.Tk):
         )
 
     def load_startup_pwm(self) -> None:
+        self._workspace_drag_active = False
+        self._workspace_drag_target = None
+        self._cancel_workspace_preview_animation(clear_override=True)
         self._use_live_preview()
         self._set_pwm_values(CLAMP_DEFAULT_PULSE, FORE_AFT_DEFAULT_PULSE, GRIPPER_LIFT_DEFAULT_PULSE, LEFT_RIGHT_DEFAULT_PULSE)
         self.preview_mode_var.set("Local preview follows the default midpoint pose.")
@@ -1464,6 +1893,7 @@ class RobotArmDebugGui(tk.Tk):
         self.clamp_var.set(CLAMP_CLOSE_PULSE)
 
     def _handle_close(self) -> None:
+        self._cancel_workspace_preview_animation(clear_override=True)
         self.disconnect_serial()
         self.destroy()
 
