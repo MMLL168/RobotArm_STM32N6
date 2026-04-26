@@ -2,6 +2,7 @@ import math
 import queue
 import re
 import threading
+import time
 import tkinter as tk
 from tkinter import messagebox
 from tkinter import ttk
@@ -50,6 +51,9 @@ WORKSPACE_VIEW_MAX_ELEVATION = 0.82
 WORKSPACE_PREVIEW_EASING = 0.3
 WORKSPACE_AXIS_GUIDE_RATIO = 0.42
 WORKSPACE_PROJECTION_PADDING_RATIO = 0.08
+WORKSPACE_REACTION_TIME_DEFAULT_MS = 120
+WORKSPACE_REACTION_TIME_MIN_MS = 0
+WORKSPACE_REACTION_TIME_MAX_MS = 1000
 
 PREVIEW_CANVAS_WIDTH = 560
 PREVIEW_CANVAS_HEIGHT = 360
@@ -102,6 +106,8 @@ class RobotArmDebugGui(tk.Tk):
         self.port_var = tk.StringVar()
         self.connection_var = tk.StringVar(value="Disconnected")
         self.connect_button_var = tk.StringVar(value="Connect")
+        self.workspace_interaction_mode_var = tk.StringVar(value="Hold Preview / Release Send")
+        self.workspace_reaction_time_var = tk.StringVar(value=str(WORKSPACE_REACTION_TIME_DEFAULT_MS))
 
         self.x_var = tk.StringVar(value=str(default_x_mm))
         self.y_var = tk.StringVar(value=str(default_y_mm))
@@ -116,7 +122,7 @@ class RobotArmDebugGui(tk.Tk):
         self.pose_summary_var = tk.StringVar(value="Local pose estimate pending")
         self.target_summary_var = tk.StringVar(value=f"Local target x={default_x_mm} y={default_y_mm} z={default_z_mm} mm")
         self.preview_legend_var = tk.StringVar(
-            value="Orange shoulder housing = Fore front/back joint. Blue elbow housing = Gripper up/down joint. Cyan cloud = reachable 3D workspace. Left-hold previews a move, release sends it, right-drag rotates the view."
+            value="Orange shoulder housing = Fore front/back joint. Blue elbow housing = Gripper up/down joint. Cyan cloud = reachable 3D workspace. Choose hold-preview or live-follow mode."
         )
         self.x_range_var = tk.StringVar(value=self._format_axis_range_text("x"))
         self.y_range_var = tk.StringVar(value=self._format_axis_range_text("y"))
@@ -147,6 +153,8 @@ class RobotArmDebugGui(tk.Tk):
         self.fw_command_status_label = None
         self.pwm_frame = None
         self.preview_frame = None
+        self.workspace_mode_combo = None
+        self.workspace_reaction_time_spinbox = None
         self.command_layout_mode = None
         self._last_preview_canvas_size = (0, 0)
         self._workspace_click_candidates = []
@@ -159,14 +167,19 @@ class RobotArmDebugGui(tk.Tk):
         self._workspace_preview_joint_angles = None
         self._workspace_preview_target_angles = None
         self._workspace_preview_after_id = None
+        self._workspace_live_follow_after_id = None
+        self._workspace_live_follow_pending_target = None
+        self._workspace_last_live_send_monotonic = None
         self._suspend_preview_updates = False
         self._initial_preview_joint_angles = self._create_initial_preview_joint_angles()
 
         self._build_ui()
         self._install_variable_traces()
+        self.workspace_interaction_mode_var.trace_add("write", self._handle_workspace_interaction_mode_change)
         self._update_xyz_entry_states()
         self._refresh_xyz_validation_state()
         self.refresh_ports()
+        self._update_workspace_interaction_controls()
         self._update_preview()
         self.after(100, self._poll_log_queue)
         self.protocol("WM_DELETE_WINDOW", self._handle_close)
@@ -295,27 +308,49 @@ class RobotArmDebugGui(tk.Tk):
         self.preview_canvas.bind("<ButtonPress-3>", self._handle_preview_right_press)
         self.preview_canvas.bind("<B3-Motion>", self._handle_preview_right_drag)
         self.preview_canvas.bind("<ButtonRelease-3>", self._handle_preview_right_release)
-        ttk.Label(self.preview_frame, textvariable=self.preview_legend_var, wraplength=492, justify="left", font=("Segoe UI", 9)).grid(
-            row=1, column=0, sticky="ew", padx=8, pady=(0, 2)
+        workspace_controls_frame = ttk.Frame(self.preview_frame)
+        workspace_controls_frame.grid(row=1, column=0, sticky="ew", padx=8, pady=(0, 4))
+        workspace_controls_frame.columnconfigure(1, weight=1)
+        ttk.Label(workspace_controls_frame, text="3D Mode", font=("Segoe UI", 9, "bold")).grid(row=0, column=0, padx=(0, 6), pady=0, sticky="w")
+        self.workspace_mode_combo = ttk.Combobox(
+            workspace_controls_frame,
+            textvariable=self.workspace_interaction_mode_var,
+            state="readonly",
+            values=("Hold Preview / Release Send", "Live Follow"),
+            width=28,
         )
-        ttk.Label(self.preview_frame, textvariable=self.preview_mode_var, wraplength=492, justify="left", font=("Segoe UI", 9)).grid(
+        self.workspace_mode_combo.grid(row=0, column=1, padx=(0, 8), pady=0, sticky="ew")
+        ttk.Label(workspace_controls_frame, text="Reaction (ms)", font=("Segoe UI", 9, "bold")).grid(row=0, column=2, padx=(0, 6), pady=0, sticky="w")
+        self.workspace_reaction_time_spinbox = ttk.Spinbox(
+            workspace_controls_frame,
+            from_=WORKSPACE_REACTION_TIME_MIN_MS,
+            to=WORKSPACE_REACTION_TIME_MAX_MS,
+            increment=20,
+            textvariable=self.workspace_reaction_time_var,
+            width=8,
+        )
+        self.workspace_reaction_time_spinbox.grid(row=0, column=3, pady=0, sticky="w")
+        ttk.Label(self.preview_frame, textvariable=self.preview_legend_var, wraplength=492, justify="left", font=("Segoe UI", 9)).grid(
             row=2, column=0, sticky="ew", padx=8, pady=(0, 2)
         )
-        ttk.Label(self.preview_frame, textvariable=self.pose_summary_var, wraplength=492, justify="left", font=("Segoe UI", 9)).grid(
+        ttk.Label(self.preview_frame, textvariable=self.preview_mode_var, wraplength=492, justify="left", font=("Segoe UI", 9)).grid(
             row=3, column=0, sticky="ew", padx=8, pady=(0, 2)
         )
+        ttk.Label(self.preview_frame, textvariable=self.pose_summary_var, wraplength=492, justify="left", font=("Segoe UI", 9)).grid(
+            row=4, column=0, sticky="ew", padx=8, pady=(0, 2)
+        )
         ttk.Label(self.preview_frame, textvariable=self.target_summary_var, wraplength=492, justify="left", font=("Segoe UI", 9)).grid(
-            row=4, column=0, sticky="ew", padx=8, pady=(0, 8)
+            row=5, column=0, sticky="ew", padx=8, pady=(0, 8)
         )
-        ttk.Separator(self.preview_frame, orient="horizontal").grid(row=5, column=0, sticky="ew", padx=8, pady=(0, 6))
+        ttk.Separator(self.preview_frame, orient="horizontal").grid(row=6, column=0, sticky="ew", padx=8, pady=(0, 6))
         ttk.Label(self.preview_frame, textvariable=self.firmware_motion_var, wraplength=492, justify="left", font=("Segoe UI", 9, "bold")).grid(
-            row=6, column=0, sticky="ew", padx=8, pady=(0, 2)
-        )
-        ttk.Label(self.preview_frame, textvariable=self.firmware_pose_var, wraplength=492, justify="left", font=("Segoe UI", 9)).grid(
             row=7, column=0, sticky="ew", padx=8, pady=(0, 2)
         )
+        ttk.Label(self.preview_frame, textvariable=self.firmware_pose_var, wraplength=492, justify="left", font=("Segoe UI", 9)).grid(
+            row=8, column=0, sticky="ew", padx=8, pady=(0, 2)
+        )
         ttk.Label(self.preview_frame, textvariable=self.firmware_target_var, wraplength=492, justify="left", font=("Segoe UI", 9)).grid(
-            row=8, column=0, sticky="ew", padx=8, pady=(0, 8)
+            row=9, column=0, sticky="ew", padx=8, pady=(0, 8)
         )
 
         self._apply_command_layout("wide")
@@ -372,6 +407,77 @@ class RobotArmDebugGui(tk.Tk):
 
         self.after_idle(self._update_preview)
 
+    def _workspace_is_live_follow_mode(self) -> bool:
+        return self.workspace_interaction_mode_var.get() == "Live Follow"
+
+    def _workspace_reaction_time_ms(self) -> int:
+        try:
+            reaction_time_ms = int(self.workspace_reaction_time_var.get().strip())
+        except ValueError:
+            reaction_time_ms = WORKSPACE_REACTION_TIME_DEFAULT_MS
+
+        return max(WORKSPACE_REACTION_TIME_MIN_MS, min(WORKSPACE_REACTION_TIME_MAX_MS, reaction_time_ms))
+
+    def _cancel_workspace_live_follow_send(self) -> None:
+        if self._workspace_live_follow_after_id is not None:
+            self.after_cancel(self._workspace_live_follow_after_id)
+            self._workspace_live_follow_after_id = None
+
+        self._workspace_live_follow_pending_target = None
+
+    def _flush_workspace_live_follow_send(self) -> None:
+        self._workspace_live_follow_after_id = None
+        target = self._workspace_live_follow_pending_target
+        self._workspace_live_follow_pending_target = None
+        if target is None:
+            return
+
+        self._workspace_last_live_send_monotonic = time.monotonic()
+        self._select_workspace_target(target, auto_send=self.serial_port is not None)
+
+    def _queue_workspace_live_follow_target(self, target: tuple[int, int, int]) -> None:
+        reaction_time_ms = self._workspace_reaction_time_ms()
+        self._preview_workspace_target(
+            target,
+            status_text=(
+                f"3D workspace live-follow x={target[0]} y={target[1]} z={target[2]} mm | reaction {reaction_time_ms} ms"
+                if self.serial_port is not None
+                else f"3D workspace live-follow preview x={target[0]} y={target[1]} z={target[2]} mm | connect serial to move"
+            ),
+        )
+
+        if self.serial_port is None:
+            self._cancel_workspace_live_follow_send()
+            return
+
+        now = time.monotonic()
+        elapsed_ms = None
+        if self._workspace_last_live_send_monotonic is not None:
+            elapsed_ms = (now - self._workspace_last_live_send_monotonic) * 1000.0
+
+        if reaction_time_ms == 0 or elapsed_ms is None or elapsed_ms >= reaction_time_ms:
+            self._cancel_workspace_live_follow_send()
+            self._workspace_last_live_send_monotonic = now
+            self._select_workspace_target(target, auto_send=True)
+            return
+
+        self._workspace_live_follow_pending_target = target
+        if self._workspace_live_follow_after_id is None:
+            remaining_ms = max(1, int(round(reaction_time_ms - elapsed_ms)))
+            self._workspace_live_follow_after_id = self.after(remaining_ms, self._flush_workspace_live_follow_send)
+
+    def _handle_workspace_interaction_mode_change(self, *_args) -> None:
+        self._workspace_drag_active = False
+        self._workspace_drag_target = None
+        self._cancel_workspace_preview_animation(clear_override=True)
+        self._cancel_workspace_live_follow_send()
+        self._update_workspace_interaction_controls()
+        self._update_preview()
+
+    def _update_workspace_interaction_controls(self) -> None:
+        if self.workspace_reaction_time_spinbox is not None:
+            self.workspace_reaction_time_spinbox.configure(state="normal" if self._workspace_is_live_follow_mode() else "disabled")
+
     def _is_pointer_in_workspace_panel(self, pointer_x: float, pointer_y: float) -> bool:
         if self._workspace_panel_bounds is None:
             return False
@@ -409,6 +515,10 @@ class RobotArmDebugGui(tk.Tk):
             return
 
         self._workspace_hover_target = hover_target
+        if self._workspace_is_live_follow_mode() and hover_target is not None:
+            self._queue_workspace_live_follow_target(hover_target)
+            return
+
         self._update_preview()
 
     def _handle_preview_pointer_leave(self, _event) -> None:
@@ -417,10 +527,15 @@ class RobotArmDebugGui(tk.Tk):
         if self._workspace_hover_target is None:
             return
 
+        if self._workspace_is_live_follow_mode():
+            self._cancel_workspace_live_follow_send()
+
         self._workspace_hover_target = None
         self._update_preview()
 
     def _handle_preview_left_press(self, event) -> None:
+        if self._workspace_is_live_follow_mode():
+            return
         if not self._is_pointer_in_workspace_panel(event.x, event.y):
             return
 
@@ -435,6 +550,8 @@ class RobotArmDebugGui(tk.Tk):
         self._preview_workspace_target(closest_target)
 
     def _handle_preview_left_drag(self, event) -> None:
+        if self._workspace_is_live_follow_mode():
+            return
         if not self._workspace_drag_active:
             return
         if not self._is_pointer_in_workspace_panel(event.x, event.y):
@@ -451,6 +568,8 @@ class RobotArmDebugGui(tk.Tk):
         self._preview_workspace_target(closest_target)
 
     def _handle_preview_left_release(self, event) -> None:
+        if self._workspace_is_live_follow_mode():
+            return
         if not self._workspace_drag_active:
             return
 
@@ -577,6 +696,7 @@ class RobotArmDebugGui(tk.Tk):
         self._workspace_drag_active = False
         self._workspace_drag_target = None
         self._cancel_workspace_preview_animation(clear_override=True)
+        self._cancel_workspace_live_follow_send()
         self.preview_mode_var.set("Local preview follows manual PWM sliders.")
         self._update_preview()
 
@@ -805,7 +925,7 @@ class RobotArmDebugGui(tk.Tk):
         if has_remaining_delta:
             self._workspace_preview_after_id = self.after(16, self._animate_workspace_preview)
 
-    def _preview_workspace_target(self, target: tuple[int, int, int]) -> None:
+    def _preview_workspace_target(self, target: tuple[int, int, int], status_text: str | None = None) -> None:
         solution = self._solve_safe_ik(target[0], target[1], target[2])
         if solution is None:
             self.preview_mode_var.set("3D workspace preview skipped because this sampled point is no longer solvable.")
@@ -817,7 +937,9 @@ class RobotArmDebugGui(tk.Tk):
             self._workspace_preview_joint_angles = self._display_joint_angles()
         self._workspace_preview_target_angles = solution
         self.preview_mode_var.set(
-            f"3D workspace preview x={target[0]} y={target[1]} z={target[2]} mm | hold to scrub, release to send"
+            status_text
+            if status_text is not None
+            else f"3D workspace preview x={target[0]} y={target[1]} z={target[2]} mm | hold to scrub, release to send"
         )
         if self._workspace_preview_after_id is None:
             self._animate_workspace_preview()
@@ -1810,6 +1932,7 @@ class RobotArmDebugGui(tk.Tk):
         self._workspace_drag_active = False
         self._workspace_drag_target = None
         self._cancel_workspace_preview_animation(clear_override=True)
+        self._cancel_workspace_live_follow_send()
         self.load_startup_pwm()
         self.preview_mode_var.set("Local preview reset to the firmware HOME midpoint pose.")
         self._set_fw_command_feedback("FW command result: waiting for HOME acknowledgement", "FW echo: host sent HOME", tone="waiting")
@@ -1819,6 +1942,7 @@ class RobotArmDebugGui(tk.Tk):
         self._workspace_drag_active = False
         self._workspace_drag_target = None
         self._cancel_workspace_preview_animation(clear_override=True)
+        self._cancel_workspace_live_follow_send()
         input_issues = self._describe_current_xyz_input_issues()
         if input_issues:
             blocked_message = "XYZ send blocked: " + " | ".join(input_issues)
@@ -1865,6 +1989,7 @@ class RobotArmDebugGui(tk.Tk):
         self._workspace_drag_active = False
         self._workspace_drag_target = None
         self._cancel_workspace_preview_animation(clear_override=True)
+        self._cancel_workspace_live_follow_send()
         self._use_live_preview()
         self.preview_mode_var.set("Local preview mirrors the PWM command about to be sent.")
         self._update_preview()
@@ -1882,6 +2007,7 @@ class RobotArmDebugGui(tk.Tk):
         self._workspace_drag_active = False
         self._workspace_drag_target = None
         self._cancel_workspace_preview_animation(clear_override=True)
+        self._cancel_workspace_live_follow_send()
         self._use_live_preview()
         self._set_pwm_values(CLAMP_DEFAULT_PULSE, FORE_AFT_DEFAULT_PULSE, GRIPPER_LIFT_DEFAULT_PULSE, LEFT_RIGHT_DEFAULT_PULSE)
         self.preview_mode_var.set("Local preview follows the default midpoint pose.")
@@ -1894,6 +2020,7 @@ class RobotArmDebugGui(tk.Tk):
 
     def _handle_close(self) -> None:
         self._cancel_workspace_preview_animation(clear_override=True)
+        self._cancel_workspace_live_follow_send()
         self.disconnect_serial()
         self.destroy()
 
