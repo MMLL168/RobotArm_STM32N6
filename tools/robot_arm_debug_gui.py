@@ -17,14 +17,14 @@ ARM_FOREARM_LENGTH_MM = 90.0
 ARM_TOOL_LENGTH_MM = 55.0
 ARM_DISTAL_LENGTH_MM = ARM_FOREARM_LENGTH_MM + ARM_TOOL_LENGTH_MM
 
-LEFT_RIGHT_MIN_PULSE = 1000
-LEFT_RIGHT_MAX_PULSE = 2000
-FORE_AFT_MIN_PULSE = 900
-FORE_AFT_MAX_PULSE = 1800
-GRIPPER_LIFT_MIN_PULSE = 1000
-GRIPPER_LIFT_MAX_PULSE = 1500
-CLAMP_OPEN_PULSE = 700
-CLAMP_CLOSE_PULSE = 1600
+LEFT_RIGHT_MIN_PULSE = 1100
+LEFT_RIGHT_MAX_PULSE = 1700
+FORE_AFT_MIN_PULSE = 1000
+FORE_AFT_MAX_PULSE = 1600
+GRIPPER_LIFT_MIN_PULSE = 700
+GRIPPER_LIFT_MAX_PULSE = 1200
+CLAMP_OPEN_PULSE = 800
+CLAMP_CLOSE_PULSE = 1500
 CLAMP_DEFAULT_PULSE = (CLAMP_OPEN_PULSE + CLAMP_CLOSE_PULSE) // 2
 LEFT_RIGHT_DEFAULT_PULSE = (LEFT_RIGHT_MIN_PULSE + LEFT_RIGHT_MAX_PULSE) // 2
 FORE_AFT_DEFAULT_PULSE = (FORE_AFT_MIN_PULSE + FORE_AFT_MAX_PULSE) // 2
@@ -67,6 +67,12 @@ STATUS_MOTION_PATTERN = re.compile(
 STATUS_CARTESIAN_PATTERN = re.compile(
     r"^\[status\] cartesian target_xyz x=(-?\d+) y=(-?\d+) z=(-?\d+) mm elbow=([a-z]+)$"
 )
+STATUS_OBSTACLE_PATTERN = re.compile(
+    r"^\[status\] obstacle=([a-z_]+) range=(\d+) mm threshold=(\d+) mm clear=(\d+) mm device=([a-z\-]+)$"
+)
+SAFETY_OBSTACLE_PATTERN = re.compile(
+    r"^\[safety\] obstacle (detected|cleared) range=(\d+) mm threshold=(\d+) mm clear=(\d+) mm device=([a-z\-]+)(?: motion=([a-z_]+) action=stop)?$"
+)
 CMD_HOME_PATTERN = re.compile(
     r"^\[cmd_home\] queued (?:safe startup|default midpoint) pose duration=(\d+) ms target clamp=(\d+) fore_aft=(\d+) gripper_lift=(\d+) left_right=(\d+)$"
 )
@@ -106,6 +112,7 @@ class RobotArmDebugGui(tk.Tk):
         self.port_var = tk.StringVar()
         self.connection_var = tk.StringVar(value="Disconnected")
         self.connect_button_var = tk.StringVar(value="Connect")
+        self.log_pause_button_var = tk.StringVar(value="Pause Log")
         self.workspace_interaction_mode_var = tk.StringVar(value="Hold Preview / Release Send")
         self.workspace_reaction_time_var = tk.StringVar(value=str(WORKSPACE_REACTION_TIME_DEFAULT_MS))
 
@@ -134,12 +141,21 @@ class RobotArmDebugGui(tk.Tk):
         self.firmware_motion_var = tk.StringVar(value="Firmware motion idle | not connected")
         self.firmware_pose_var = tk.StringVar(value="Firmware pose unavailable")
         self.firmware_target_var = tk.StringVar(value="Firmware target unavailable")
+        self.firmware_obstacle_var = tk.StringVar(value="Obstacle monitor unavailable")
+        self._obstacle_monitor_state = "unknown"
+        self._obstacle_range_mm = 0
+        self._obstacle_threshold_mm = 120
+        self._obstacle_clear_mm = 140
+        self._obstacle_device_name = "no-data"
 
         self.serial_port = None
+        self._port_mapping = {}
         self.reader_stop_event = threading.Event()
         self.reader_thread = None
         self.status_poll_after_id = None
         self.log_queue = queue.Queue()
+        self.log_paused = False
+        self.paused_log_lines: list[str] = []
         self.preview_canvas = None
         self.scroll_canvas = None
         self.scrollable_frame = None
@@ -155,6 +171,7 @@ class RobotArmDebugGui(tk.Tk):
         self.preview_frame = None
         self.workspace_mode_combo = None
         self.workspace_reaction_time_spinbox = None
+        self.firmware_obstacle_label = None
         self.command_layout_mode = None
         self._last_preview_canvas_size = (0, 0)
         self._workspace_click_candidates = []
@@ -276,7 +293,7 @@ class RobotArmDebugGui(tk.Tk):
         self._add_scale(self.pwm_frame, "Clamp", self.clamp_var, CLAMP_OPEN_PULSE, CLAMP_CLOSE_PULSE, 0)
         self._add_scale(self.pwm_frame, "Fore (Front/Back)", self.fore_aft_var, FORE_AFT_MIN_PULSE, FORE_AFT_MAX_PULSE, 1)
         self._add_scale(self.pwm_frame, "Gripper (Up/Down)", self.gripper_lift_var, GRIPPER_LIFT_MIN_PULSE, GRIPPER_LIFT_MAX_PULSE, 2)
-        self._add_scale(self.pwm_frame, "Left/Right", self.left_right_var, LEFT_RIGHT_MIN_PULSE, LEFT_RIGHT_MAX_PULSE, 3)
+        self._add_scale_with_directions(self.pwm_frame, "Right/Left", self.left_right_var, LEFT_RIGHT_MIN_PULSE, LEFT_RIGHT_MAX_PULSE, 3, "Right", "Left")
         ttk.Button(self.pwm_frame, text="Load Midpoint", command=self.load_startup_pwm).grid(row=4, column=0, padx=8, pady=10, sticky="ew")
         ttk.Button(self.pwm_frame, text="Send PWM", command=self.send_pwm_command).grid(row=4, column=1, padx=8, pady=10, sticky="ew")
 
@@ -352,6 +369,17 @@ class RobotArmDebugGui(tk.Tk):
         ttk.Label(self.preview_frame, textvariable=self.firmware_target_var, wraplength=492, justify="left", font=("Segoe UI", 9)).grid(
             row=9, column=0, sticky="ew", padx=8, pady=(0, 8)
         )
+        self.firmware_obstacle_label = tk.Label(
+            self.preview_frame,
+            textvariable=self.firmware_obstacle_var,
+            justify="left",
+            anchor="w",
+            fg="#8a1020",
+            bg="#f0f0f0",
+            font=("Segoe UI", 9, "bold"),
+            wraplength=492,
+        )
+        self.firmware_obstacle_label.grid(row=10, column=0, sticky="ew", padx=8, pady=(0, 8))
 
         self._apply_command_layout("wide")
 
@@ -377,7 +405,9 @@ class RobotArmDebugGui(tk.Tk):
         bottom_frame = ttk.Frame(self.scrollable_frame)
         bottom_frame.grid(row=3, column=0, sticky="ew", padx=12, pady=(0, 12))
         ttk.Button(bottom_frame, text="HELP", command=lambda: self.send_command("HELP")).pack(side="left")
-        ttk.Button(bottom_frame, text="Clear Log", command=self.clear_log).pack(side="left", padx=8)
+        ttk.Button(bottom_frame, textvariable=self.log_pause_button_var, command=self.toggle_log_pause).pack(side="left", padx=(8, 0))
+        ttk.Button(bottom_frame, text="Copy Log", command=self.copy_log).pack(side="left", padx=8)
+        ttk.Button(bottom_frame, text="Clear Log", command=self.clear_log).pack(side="left")
 
     def _handle_scrollable_frame_configure(self, _event) -> None:
         self._update_scroll_region()
@@ -856,9 +886,65 @@ class RobotArmDebugGui(tk.Tk):
         if self.fw_command_status_label is not None:
             self.fw_command_status_label.configure(fg=tone_colors.get(tone, tone_colors["neutral"]))
 
+    def _set_firmware_obstacle_feedback(self, text: str, tone: str) -> None:
+        tone_colors = {
+            "neutral": "#1f2933",
+            "success": "#0f6b3c",
+            "warning": "#9a6700",
+            "error": "#b42318",
+        }
+
+        self.firmware_obstacle_var.set(text)
+        if self.firmware_obstacle_label is not None:
+            self.firmware_obstacle_label.configure(fg=tone_colors.get(tone, tone_colors["neutral"]))
+
+    def _set_obstacle_monitor_state(
+        self,
+        state: str,
+        range_mm: int,
+        threshold_mm: int,
+        clear_mm: int,
+        device_name: str,
+    ) -> None:
+        self._obstacle_monitor_state = state
+        self._obstacle_range_mm = range_mm
+        self._obstacle_threshold_mm = threshold_mm
+        self._obstacle_clear_mm = clear_mm
+        self._obstacle_device_name = device_name
+        if self.preview_canvas is not None:
+            self._update_preview()
+
     def _add_scale(self, parent, label, variable, minimum, maximum, row) -> None:
         value_label = ttk.Label(parent, textvariable=variable, width=6)
         ttk.Label(parent, text=label).grid(row=row, column=0, padx=8, pady=(10, 0), sticky="w")
+        scale = tk.Scale(
+            parent,
+            from_=minimum,
+            to=maximum,
+            orient="horizontal",
+            resolution=1,
+            variable=variable,
+            length=340,
+            bg="#f3f7fb",
+            troughcolor="#bfd9ff",
+            activebackground="#ff9447",
+            highlightthickness=0,
+        )
+        scale.grid(row=row, column=1, padx=8, pady=(10, 0), sticky="ew")
+        value_label.grid(row=row, column=2, padx=(0, 8), pady=(10, 0), sticky="w")
+
+    def _add_scale_with_directions(self, parent, label, variable, minimum, maximum, row, left_label, right_label) -> None:
+        value_label = ttk.Label(parent, textvariable=variable, width=6)
+        ttk.Label(parent, text=label).grid(row=row, column=0, padx=8, pady=(10, 0), sticky="w")
+
+        # 方向標籤框架
+        direction_frame = ttk.Frame(parent)
+        direction_frame.grid(row=row+1, column=1, padx=8, pady=(0, 10), sticky="ew")
+        direction_frame.columnconfigure(1, weight=1)
+
+        ttk.Label(direction_frame, text=left_label, foreground="#666666").grid(row=0, column=0, sticky="w")
+        ttk.Label(direction_frame, text=right_label, foreground="#666666").grid(row=0, column=2, sticky="e")
+
         scale = tk.Scale(
             parent,
             from_=minimum,
@@ -1541,6 +1627,179 @@ class RobotArmDebugGui(tk.Tk):
             canvas.create_line(target_x - 16, target_y, target_x + 16, target_y, fill="#ff6f91", width=2)
             canvas.create_line(target_x, target_y - 16, target_x, target_y + 16, fill="#ff6f91", width=2)
 
+        tof_panel_left = 20.0
+        tof_panel_right = side_left - 18.0
+        tof_panel_top = content_top + 36.0
+        tof_panel_bottom = content_bottom - 40.0
+        if (tof_panel_right - tof_panel_left) >= 170.0:
+            tof_panel_width = tof_panel_right - tof_panel_left
+            tof_panel_height = tof_panel_bottom - tof_panel_top
+            tof_center_x = tof_panel_left + (tof_panel_width * 0.5)
+            tof_center_y = tof_panel_top + min(126.0, tof_panel_height * 0.42)
+            gauge_radius = min(74.0, tof_panel_width * 0.34)
+            gauge_left = tof_center_x - gauge_radius
+            gauge_top = tof_center_y - gauge_radius
+            gauge_right = tof_center_x + gauge_radius
+            gauge_bottom = tof_center_y + gauge_radius
+            display_cap_mm = max(300, self._obstacle_clear_mm * 2, self._obstacle_range_mm + 40)
+            obstacle_ratio = max(0.0, min(1.0, self._obstacle_range_mm / display_cap_mm)) if display_cap_mm > 0 else 0.0
+            clear_ratio = max(0.0, min(1.0, self._obstacle_clear_mm / display_cap_mm)) if display_cap_mm > 0 else 0.0
+
+            if self._obstacle_monitor_state == "detected":
+                tof_primary = "#ff6b6b"
+                tof_secondary = "#ffd0c8"
+                tof_status_title = "PATH BLOCKED"
+                tof_status_body = "TOF auto-brake engaged"
+                tof_card_fill = "#0f1726"
+                tof_card_outline = "#913838"
+            elif self._obstacle_monitor_state == "clear":
+                tof_primary = "#52f7ff"
+                tof_secondary = "#d8fdff"
+                tof_status_title = "CLEAR TO MOVE"
+                tof_status_body = "3D pick feels safe"
+                tof_card_fill = "#0f1726"
+                tof_card_outline = "#226a7c"
+            elif self._obstacle_monitor_state == "disabled":
+                tof_primary = "#7e8ca3"
+                tof_secondary = "#d5dbe4"
+                tof_status_title = "TOF OFFLINE"
+                tof_status_body = "Connect and poll STATUS"
+                tof_card_fill = "#111722"
+                tof_card_outline = "#3b4858"
+            else:
+                tof_primary = "#ffb347"
+                tof_secondary = "#fff0c7"
+                tof_status_title = "TOF STANDBY"
+                tof_status_body = "Waiting for valid range"
+                tof_card_fill = "#0f1726"
+                tof_card_outline = "#7a5a24"
+
+            canvas.create_rectangle(tof_panel_left, tof_panel_top, tof_panel_right, tof_panel_bottom, fill=tof_card_fill, outline=tof_card_outline, width=2)
+            canvas.create_oval(tof_panel_left - 26, tof_panel_top + 18, tof_panel_left + 64, tof_panel_top + 108, fill="#13283f", outline="")
+            canvas.create_oval(tof_panel_right - 86, tof_panel_top + 132, tof_panel_right + 8, tof_panel_top + 226, fill="#10233a", outline="")
+            canvas.create_text(
+                tof_panel_left + 18,
+                tof_panel_top + 18,
+                anchor="w",
+                text="TOF Safety",
+                fill="#f3fbff",
+                font=("Segoe UI", 12, "bold"),
+            )
+            canvas.create_text(
+                tof_panel_left + 18,
+                tof_panel_top + 40,
+                anchor="w",
+                text="3D pick + obstacle auto-brake",
+                fill="#8bcfff",
+                font=("Segoe UI", 8, "bold"),
+            )
+            canvas.create_arc(gauge_left, gauge_top, gauge_right, gauge_bottom, start=135, extent=270, style=tk.ARC, width=16, outline="#173149")
+            canvas.create_arc(
+                gauge_left,
+                gauge_top,
+                gauge_right,
+                gauge_bottom,
+                start=135,
+                extent=270 * clear_ratio,
+                style=tk.ARC,
+                width=16,
+                outline="#6f2d34",
+            )
+            canvas.create_arc(
+                gauge_left,
+                gauge_top,
+                gauge_right,
+                gauge_bottom,
+                start=135,
+                extent=270 * obstacle_ratio,
+                style=tk.ARC,
+                width=16,
+                outline=tof_primary,
+            )
+            marker_angle_deg = 135 + (270 * min(1.0, max(0.0, self._obstacle_threshold_mm / display_cap_mm)))
+            marker_angle_rad = math.radians(marker_angle_deg)
+            marker_outer_radius = gauge_radius + 7.0
+            marker_inner_radius = gauge_radius - 13.0
+            marker_x_outer = tof_center_x + (math.cos(marker_angle_rad) * marker_outer_radius)
+            marker_y_outer = tof_center_y - (math.sin(marker_angle_rad) * marker_outer_radius)
+            marker_x_inner = tof_center_x + (math.cos(marker_angle_rad) * marker_inner_radius)
+            marker_y_inner = tof_center_y - (math.sin(marker_angle_rad) * marker_inner_radius)
+            canvas.create_line(marker_x_inner, marker_y_inner, marker_x_outer, marker_y_outer, fill="#ffe082", width=3)
+            canvas.create_text(
+                tof_center_x,
+                tof_center_y - 8,
+                text=f"{self._obstacle_range_mm if self._obstacle_monitor_state != 'disabled' else '--'}",
+                fill=tof_secondary,
+                font=("Segoe UI", 24, "bold"),
+            )
+            canvas.create_text(
+                tof_center_x,
+                tof_center_y + 20,
+                text="mm",
+                fill="#94abc2",
+                font=("Segoe UI", 10, "bold"),
+            )
+            canvas.create_text(
+                tof_center_x,
+                tof_center_y + 48,
+                text=tof_status_title,
+                fill=tof_primary,
+                font=("Segoe UI", 10, "bold"),
+            )
+            canvas.create_text(
+                tof_center_x,
+                tof_center_y + 68,
+                text=tof_status_body,
+                fill="#d6e7f8",
+                font=("Segoe UI", 8),
+            )
+            sensor_bar_left = tof_panel_left + 24
+            sensor_bar_right = tof_panel_right - 24
+            sensor_bar_top = tof_panel_bottom - 92
+            sensor_bar_bottom = sensor_bar_top + 16
+            sensor_fill_right = sensor_bar_left + ((sensor_bar_right - sensor_bar_left) * obstacle_ratio)
+            canvas.create_rectangle(sensor_bar_left, sensor_bar_top, sensor_bar_right, sensor_bar_bottom, fill="#102033", outline="#264764")
+            canvas.create_rectangle(sensor_bar_left, sensor_bar_top, sensor_fill_right, sensor_bar_bottom, fill=tof_primary, outline="")
+            threshold_x = sensor_bar_left + ((sensor_bar_right - sensor_bar_left) * min(1.0, max(0.0, self._obstacle_threshold_mm / display_cap_mm)))
+            canvas.create_line(threshold_x, sensor_bar_top - 6, threshold_x, sensor_bar_bottom + 6, fill="#ffe082", width=2)
+            canvas.create_text(
+                sensor_bar_left,
+                sensor_bar_top - 10,
+                anchor="sw",
+                text=f"Auto-stop <= {self._obstacle_threshold_mm} mm",
+                fill="#ffe082",
+                font=("Segoe UI", 8, "bold"),
+            )
+            canvas.create_text(
+                sensor_bar_right,
+                sensor_bar_bottom + 12,
+                anchor="ne",
+                text=f"device {self._obstacle_device_name}",
+                fill="#7ca2c4",
+                font=("Segoe UI", 7),
+            )
+            cta_left = tof_panel_left + 18
+            cta_right = tof_panel_right - 18
+            cta_top = tof_panel_bottom - 48
+            cta_bottom = tof_panel_bottom - 18
+            canvas.create_rectangle(cta_left, cta_top, cta_right, cta_bottom, fill="#11314c", outline="#50d7ff", width=2)
+            canvas.create_text(
+                cta_left + 12,
+                (cta_top + cta_bottom) * 0.5,
+                anchor="w",
+                text="Click 3D Cloud",
+                fill="#ecfcff",
+                font=("Segoe UI", 10, "bold"),
+            )
+            canvas.create_text(
+                cta_right - 12,
+                (cta_top + cta_bottom) * 0.5,
+                anchor="e",
+                text=">>>",
+                fill="#50d7ff",
+                font=("Consolas", 12, "bold"),
+            )
+
         workspace_left = side_right + 22
         workspace_top = content_top + 32
         workspace_right = width - 20
@@ -1551,18 +1810,31 @@ class RobotArmDebugGui(tk.Tk):
         self._workspace_panel_bounds = (workspace_left, workspace_top, workspace_right, workspace_bottom)
         canvas.create_rectangle(workspace_left, workspace_top, workspace_right, workspace_bottom, fill="#0d1628", outline="#233a57", width=2)
         canvas.create_text(workspace_left + 14, workspace_top + 18, anchor="w", text="3D Workspace", fill="#d8f3ff", font=("Segoe UI", 10, "bold"))
+        badge_right = workspace_right - 14
+        badge_left = badge_right - 112
+        badge_top = workspace_top + 10
+        badge_bottom = badge_top + 22
+        canvas.create_rectangle(badge_left, badge_top, badge_right, badge_bottom, fill="#12324a", outline="#4fd8ff", width=1)
+        canvas.create_text(
+            (badge_left + badge_right) * 0.5,
+            (badge_top + badge_bottom) * 0.5,
+            text="TRY 3D PICK",
+            fill="#ecfcff",
+            font=("Segoe UI", 8, "bold"),
+        )
+        workspace_header_text_width = max(160.0, (badge_left - workspace_left) - 28.0)
         canvas.create_text(
             workspace_left + 14,
             workspace_top + 36,
             anchor="w",
-            text="Hover shows nearest XYZ. Left-hold previews smoothly and release sends. Right-drag rotates the 3D view.",
+            text="Hover shows nearest XYZ. Click the cyan cloud to preview motion, release to send, and right-drag to rotate the 3D view.",
             fill="#8bcfff",
             font=("Segoe UI", 8),
-            width=workspace_text_width,
+            width=workspace_header_text_width,
         )
 
         workspace_plot_left = workspace_left + 14
-        workspace_plot_top = workspace_top + 58
+        workspace_plot_top = workspace_top + 70
         workspace_plot_right = workspace_right - 14
         workspace_plot_bottom = workspace_bottom - 84
         workspace_plot_width = workspace_plot_right - workspace_plot_left
@@ -1664,7 +1936,7 @@ class RobotArmDebugGui(tk.Tk):
             text=(
                 f"Hover x={self._workspace_hover_target[0]} y={self._workspace_hover_target[1]} z={self._workspace_hover_target[2]} mm"
                 if self._workspace_hover_target is not None
-                else "Hover a cyan point | left-hold preview | release send | right-drag orbit"
+                else "Click a cyan point | hold preview or switch to Live Follow | right-drag orbit"
             ),
             fill="#8bcfff",
             font=("Segoe UI", 8),
@@ -1672,11 +1944,26 @@ class RobotArmDebugGui(tk.Tk):
         )
 
     def refresh_ports(self) -> None:
-        ports = sorted(port.device for port in list_ports.comports())
-        self.port_combo["values"] = ports
-        if ports and self.port_var.get() not in ports:
-            self.port_var.set(ports[0])
-        if not ports:
+        comports = list_ports.comports()
+        # 顯示端口名稱和描述
+        port_display_list = []
+        port_mapping = {}
+        for port in sorted(comports, key=lambda p: p.device):
+            display_name = f"{port.device} - {port.description}" if port.description else port.device
+            port_display_list.append(display_name)
+            port_mapping[display_name] = port.device
+
+        self.port_combo["values"] = port_display_list
+        self._port_mapping = port_mapping
+
+        current_value = self.port_var.get()
+        # 檢查當前值是否還有效
+        if current_value not in port_mapping:
+            if port_display_list:
+                self.port_var.set(port_display_list[0])
+            else:
+                self.port_var.set("")
+        if not port_display_list:
             self.port_var.set("")
 
     def toggle_connection(self) -> None:
@@ -1686,10 +1973,13 @@ class RobotArmDebugGui(tk.Tk):
             self.disconnect_serial()
 
     def connect_serial(self) -> None:
-        port = self.port_var.get().strip()
-        if not port:
+        port_display = self.port_var.get().strip()
+        if not port_display:
             messagebox.showerror("Robot Arm Debug Tool", "Select a serial port first.")
             return
+
+        # 從映射獲取實際端口
+        port = getattr(self, '_port_mapping', {}).get(port_display, port_display)
 
         try:
             self.serial_port = serial.Serial(port=port, baudrate=115200, timeout=0.1, write_timeout=1.0)
@@ -1705,6 +1995,8 @@ class RobotArmDebugGui(tk.Tk):
         self.firmware_motion_var.set("Firmware connected. Waiting for STATUS...")
         self.firmware_pose_var.set("Firmware pose pending")
         self.firmware_target_var.set("Firmware target pending")
+        self._set_firmware_obstacle_feedback("Obstacle monitor waiting for STATUS...", "warning")
+        self._set_obstacle_monitor_state("unknown", 0, 120, 140, "pending")
         self._set_fw_command_feedback("FW command result: connected, waiting for next command", "FW echo: no command acknowledgement yet", tone="neutral")
         self.append_log(f"[host] connected to {port}")
         self._schedule_status_poll(initial_delay_ms=150)
@@ -1730,6 +2022,8 @@ class RobotArmDebugGui(tk.Tk):
         self.firmware_motion_var.set("Firmware motion idle | disconnected")
         self.firmware_pose_var.set("Firmware pose unavailable")
         self.firmware_target_var.set("Firmware target unavailable")
+        self._set_firmware_obstacle_feedback("Obstacle monitor unavailable | disconnected", "neutral")
+        self._set_obstacle_monitor_state("disabled", 0, 120, 140, "disconnected")
         self._set_fw_command_feedback("FW command result: disconnected", "FW echo: serial link closed", tone="error")
         self.append_log("[host] disconnected")
 
@@ -1756,14 +2050,43 @@ class RobotArmDebugGui(tk.Tk):
 
         self.after(100, self._poll_log_queue)
 
-    def append_log(self, line: str) -> None:
-        self._handle_firmware_line(line)
+    def _append_log_text(self, line: str) -> None:
         self.log_text.configure(state="normal")
         self.log_text.insert("end", line + "\n")
         self.log_text.see("end")
         self.log_text.configure(state="disabled")
 
+    def append_log(self, line: str) -> None:
+        self._handle_firmware_line(line)
+        if self.log_paused:
+            self.paused_log_lines.append(line)
+            return
+
+        self._append_log_text(line)
+
+    def toggle_log_pause(self) -> None:
+        self.log_paused = not self.log_paused
+        self.log_pause_button_var.set("Resume Log" if self.log_paused else "Pause Log")
+        if self.log_paused or not self.paused_log_lines:
+            return
+
+        buffered_lines = self.paused_log_lines
+        self.paused_log_lines = []
+        for buffered_line in buffered_lines:
+            self._append_log_text(buffered_line)
+
+    def copy_log(self) -> None:
+        log_text = self.log_text.get("1.0", "end-1c")
+        if self.paused_log_lines:
+            pending_text = "\n".join(self.paused_log_lines)
+            log_text = pending_text if not log_text else f"{log_text}\n{pending_text}"
+
+        self.clipboard_clear()
+        self.clipboard_append(log_text)
+        self.update_idletasks()
+
     def clear_log(self) -> None:
+        self.paused_log_lines = []
         self.log_text.configure(state="normal")
         self.log_text.delete("1.0", "end")
         self.log_text.configure(state="disabled")
@@ -1814,6 +2137,30 @@ class RobotArmDebugGui(tk.Tk):
             self._schedule_status_poll(initial_delay_ms=500)
 
     def _handle_firmware_line(self, line: str) -> None:
+        obstacle_event_match = SAFETY_OBSTACLE_PATTERN.match(line)
+        if obstacle_event_match is not None:
+            state, range_mm, threshold_mm, _clear_mm, device_name, motion_name = obstacle_event_match.groups()
+            if state == "detected":
+                self._set_obstacle_monitor_state("detected", int(range_mm), int(threshold_mm), int(_clear_mm), device_name)
+                self._set_firmware_obstacle_feedback(
+                    f"MSG: 有障礙物，手臂已停止 | range={range_mm} mm | threshold={threshold_mm} mm | device={device_name}",
+                    "error",
+                )
+                if motion_name is not None:
+                    self.firmware_motion_var.set(f"Firmware motion {motion_name} stopped by obstacle")
+                self._set_fw_command_feedback(
+                    "FW safety: 有障礙物，手臂已停止",
+                    f"FW echo range={range_mm} mm | threshold={threshold_mm} mm | device={device_name}",
+                    tone="error",
+                )
+            else:
+                self._set_obstacle_monitor_state("clear", int(range_mm), int(threshold_mm), int(_clear_mm), device_name)
+                self._set_firmware_obstacle_feedback(
+                    f"Obstacle monitor: clear | range={range_mm} mm | threshold={threshold_mm} mm | device={device_name}",
+                    "success",
+                )
+            return
+
         home_match = CMD_HOME_PATTERN.match(line)
         if home_match is not None:
             duration_ms, clamp_us, fore_aft_us, gripper_lift_us, left_right_us = home_match.groups()
@@ -1874,6 +2221,32 @@ class RobotArmDebugGui(tk.Tk):
             self.firmware_target_var.set(
                 f"Firmware Cartesian target x={x_mm} y={y_mm} z={z_mm} mm | elbow={elbow_mode}"
             )
+            return
+
+        obstacle_status_match = STATUS_OBSTACLE_PATTERN.match(line)
+        if obstacle_status_match is not None:
+            state, range_mm, threshold_mm, clear_mm, device_name = obstacle_status_match.groups()
+            self._set_obstacle_monitor_state(state, int(range_mm), int(threshold_mm), int(clear_mm), device_name)
+            if state == "detected":
+                self._set_firmware_obstacle_feedback(
+                    f"MSG: 有障礙物 | range={range_mm} mm | threshold={threshold_mm} mm | device={device_name}",
+                    "error",
+                )
+            elif state == "clear":
+                self._set_firmware_obstacle_feedback(
+                    f"Obstacle monitor: clear | range={range_mm} mm | threshold={threshold_mm} mm | device={device_name}",
+                    "success",
+                )
+            elif state == "unknown":
+                self._set_firmware_obstacle_feedback(
+                    f"Obstacle monitor: waiting for valid TOF range | last={range_mm} mm | device={device_name}",
+                    "warning",
+                )
+            else:
+                self._set_firmware_obstacle_feedback(
+                    f"Obstacle monitor: unavailable | device={device_name}",
+                    "neutral",
+                )
             return
 
         xyz_queue_match = CMD_XYZ_CARTESIAN_PATTERN.match(line)

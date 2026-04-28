@@ -80,6 +80,8 @@ void Error_Handler(void);
 /* Private defines -----------------------------------------------------------*/
 #define I2C1_SDA_Pin GPIO_PIN_1
 #define I2C1_SDA_GPIO_Port GPIOC
+#define LCD_MOSI_Pin GPIO_PIN_7
+#define LCD_MOSI_GPIO_Port GPIOH
 #define I2CA_SCL_Pin GPIO_PIN_9
 #define I2CA_SCL_GPIO_Port GPIOH
 #define TRACED1_Pin GPIO_PIN_0
@@ -88,6 +90,8 @@ void Error_Handler(void);
 #define TRACED3_GPIO_Port GPIOB
 #define TRACED2_Pin GPIO_PIN_6
 #define TRACED2_GPIO_Port GPIOB
+#define LCD_SCK_Pin GPIO_PIN_5
+#define LCD_SCK_GPIO_Port GPIOH
 #define TRACECLK_Pin GPIO_PIN_3
 #define TRACECLK_GPIO_Port GPIOB
 #define TRACED0_Pin GPIO_PIN_3

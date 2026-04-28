@@ -69,20 +69,20 @@
 #define APP_BUTTON_TOGGLE_DEBOUNCE_MS 150U
 #define APP_SERVO_DEMO_TRIGGER_MS 50U
 #define APP_SERVO_DEMO_STEP_HOLD_MS 700U
-#define APP_CLAMP_SERVO_SAFE_PULSE_US 1500U
-#define APP_CLAMP_SERVO_OPEN_PULSE_US 700U
-#define APP_CLAMP_SERVO_CLOSE_PULSE_US 1600U
+#define APP_CLAMP_SERVO_SAFE_PULSE_US 1150U
+#define APP_CLAMP_SERVO_OPEN_PULSE_US 800U
+#define APP_CLAMP_SERVO_CLOSE_PULSE_US 1500U
 #define APP_CLAMP_SERVO_DEFAULT_PULSE_US ((APP_CLAMP_SERVO_OPEN_PULSE_US + APP_CLAMP_SERVO_CLOSE_PULSE_US) / 2U)
-#define APP_FORE_AFT_SERVO_AFT_PULSE_US 900U
-#define APP_FORE_AFT_SERVO_FORE_PULSE_US 1800U
-#define APP_FORE_AFT_SERVO_CENTER_PULSE_US 1500U
+#define APP_FORE_AFT_SERVO_AFT_PULSE_US 1000U
+#define APP_FORE_AFT_SERVO_FORE_PULSE_US 1600U
+#define APP_FORE_AFT_SERVO_CENTER_PULSE_US 1300U
 #define APP_FORE_AFT_SERVO_DEFAULT_PULSE_US ((APP_FORE_AFT_SERVO_AFT_PULSE_US + APP_FORE_AFT_SERVO_FORE_PULSE_US) / 2U)
-#define APP_GRIPPER_LIFT_SERVO_UP_PULSE_US 1500U
-#define APP_GRIPPER_LIFT_SERVO_DOWN_PULSE_US 1000U
+#define APP_GRIPPER_LIFT_SERVO_UP_PULSE_US 1200U
+#define APP_GRIPPER_LIFT_SERVO_DOWN_PULSE_US 700U
 #define APP_GRIPPER_LIFT_SERVO_DEFAULT_PULSE_US ((APP_GRIPPER_LIFT_SERVO_UP_PULSE_US + APP_GRIPPER_LIFT_SERVO_DOWN_PULSE_US) / 2U)
-#define APP_LEFT_RIGHT_SERVO_CENTER_PULSE_US 1500U
-#define APP_LEFT_RIGHT_SERVO_LEFT_PULSE_US 2000U
-#define APP_LEFT_RIGHT_SERVO_RIGHT_PULSE_US 1000U
+#define APP_LEFT_RIGHT_SERVO_CENTER_PULSE_US 1400U
+#define APP_LEFT_RIGHT_SERVO_LEFT_PULSE_US 1700U
+#define APP_LEFT_RIGHT_SERVO_RIGHT_PULSE_US 1100U
 #define APP_LEFT_RIGHT_SERVO_DEFAULT_PULSE_US ((APP_LEFT_RIGHT_SERVO_LEFT_PULSE_US + APP_LEFT_RIGHT_SERVO_RIGHT_PULSE_US) / 2U)
 #define APP_ROBOT_ARM_PI 3.14159265358979323846f
 #define APP_LEFT_RIGHT_SAFE_MIN_DEG (-60.0f)
@@ -98,6 +98,11 @@
 #define APP_SERVO_TRAJECTORY_UPDATE_INTERVAL_MS 20U
 #define APP_SERVO_TRAJECTORY_MIN_DURATION_MS 180U
 #define APP_SERVO_TRAJECTORY_MAX_DURATION_MS 2200U
+#define APP_OBSTACLE_MONITOR_INTERVAL_MS 100U
+#define APP_VL53L0X_RECOVERY_INTERVAL_MS 1500U
+#define APP_OBSTACLE_STOP_DISTANCE_MM 120U
+#define APP_OBSTACLE_CLEAR_HYSTERESIS_MM 20U
+#define APP_OBSTACLE_CLEAR_DISTANCE_MM (APP_OBSTACLE_STOP_DISTANCE_MM + APP_OBSTACLE_CLEAR_HYSTERESIS_MM)
 #define APP_SERVO_TRAJECTORY_CLAMP_SPEED_US_PER_S 1800U
 #define APP_SERVO_TRAJECTORY_FORE_AFT_SPEED_US_PER_S 900U
 #define APP_SERVO_TRAJECTORY_GRIPPER_LIFT_SPEED_US_PER_S 700U
@@ -197,9 +202,14 @@ static bool phase1_vl53l0x_ready = false;
 static uint8_t phase1_vl53l0x_stop_variable = 0U;
 static bool phase1_vl53l0x_has_last_range = false;
 static uint16_t phase1_vl53l0x_last_range_mm = 0U;
+static bool app_obstacle_has_last_measurement = false;
+static bool app_obstacle_detected = false;
+static Phase1_Vl53l0xMeasurement app_obstacle_last_measurement = { 0U, 0U, 0U };
 static uint32_t app_last_blink_tick = 0U;
 static uint32_t app_last_heartbeat_tick = 0U;
 static uint32_t app_last_sensor_tick = 0U;
+static uint32_t app_last_obstacle_monitor_tick = 0U;
+static uint32_t app_last_vl53l0x_recovery_tick = 0U;
 static uint32_t app_last_button_toggle_tick = 0U;
 static uint32_t app_button_press_tick = 0U;
 static bool app_button_pressed = false;
@@ -276,6 +286,11 @@ static uint32_t App_CartesianTrajectoryComputeDurationMs(const RobotArmVector3 *
                                                          const RobotArmVector3 *target_position,
                                                          const App_ServoPulseSet *start_pulses,
                                                          const App_ServoPulseSet *target_pulses);
+static bool App_HasActiveMotion(void);
+static App_ServoMotionSource App_GetActiveMotionSource(void);
+static void App_StopActiveMotionAtCurrentPose(void);
+static void App_TryRecoverVl53l0x(uint32_t now);
+static void App_UpdateObstacleMonitor(uint32_t now);
 static float App_MinimumJerkBlend(uint32_t elapsed_ms, uint32_t duration_ms);
 static uint16_t App_InterpolatePulse(uint16_t start_pulse_us, uint16_t target_pulse_us, float blend);
 static bool App_ServoTrajectoryStart(const App_ServoPulseSet *target_pulses,
@@ -324,6 +339,7 @@ static bool App_RobotArmMoveToTarget(const RobotArmVector3 *target_position);
 static void App_LogRobotArmStatus(void);
 static void App_LPUART1_StartReceiveIT(void);
 static void App_ProcessSerialInput(void);
+static void App_ClearInheritedInterruptState(void);
 static void App_QueueSerialByteFromISR(uint8_t received_byte);
 static bool App_DequeueSerialByte(uint8_t *received_byte_out);
 static void App_HandleSerialByte(uint8_t received_byte);
@@ -337,6 +353,7 @@ static bool Phase0_IsButtonPressed(void);
 static void Phase0_SetLedState(GPIO_TypeDef *gpio_port, uint16_t gpio_pin, bool on);
 static void Phase0_LogStartup(bool button_pressed);
 static bool Phase1_IsDeviceReady(uint8_t address);
+static void Phase1_RecoverI2cBus(void);
 static bool Phase1_WriteRegister8(uint8_t address, uint8_t register_address, uint8_t value);
 static bool Phase1_ReadRegister8(uint8_t address, uint8_t register_address, uint8_t *value);
 static bool Phase1_ReadRegisters(uint8_t address, uint8_t register_address, uint8_t *buffer, uint16_t length);
@@ -348,6 +365,9 @@ static void Phase1_LogMpu6050Data(void);
 static void Phase1_LogVl53l0xProbe(uint8_t address);
 static bool Phase1_Vl53l0xPrepareSingleShot(uint8_t address);
 static bool Phase1_Vl53l0xInit(uint8_t address);
+static bool Phase1_Vl53l0xReadMeasurementInternal(uint8_t address,
+                                                  Phase1_Vl53l0xMeasurement *measurement,
+                                                  bool log_failures);
 static bool Phase1_Vl53l0xReadMeasurement(uint8_t address, Phase1_Vl53l0xMeasurement *measurement);
 static const char *Phase1_Vl53l0xDeviceCodeString(uint8_t device_code);
 static const char *Phase1_Vl53l0xMeasurementNote(const Phase1_Vl53l0xMeasurement *measurement, bool has_delta, uint16_t delta_mm);
@@ -383,6 +403,7 @@ void App_ConfigureSystemIsolation(void)
 
 void App_Init(void)
 {
+  App_ClearInheritedInterruptState();
   App_GPIO_Init();
   App_LPUART1_UART_Init();
   App_I2C1_Init();
@@ -397,6 +418,8 @@ void App_Init(void)
   app_last_blink_tick = HAL_GetTick();
   app_last_heartbeat_tick = app_last_blink_tick;
   app_last_sensor_tick = app_last_blink_tick;
+  app_last_obstacle_monitor_tick = app_last_blink_tick;
+  app_last_vl53l0x_recovery_tick = app_last_blink_tick;
   app_last_button_toggle_tick = 0U;
   app_button_press_tick = 0U;
 
@@ -407,9 +430,25 @@ void App_Init(void)
   App_LogRobotArmKinematicsModel();
 }
 
+static void App_ClearInheritedInterruptState(void)
+{
+  /* Appli does not own XSPI1/2/3; clear stale state inherited from earlier boot stages. */
+  HAL_NVIC_DisableIRQ(XSPI1_IRQn);
+  NVIC_ClearPendingIRQ(XSPI1_IRQn);
+
+  HAL_NVIC_DisableIRQ(XSPI2_IRQn);
+  NVIC_ClearPendingIRQ(XSPI2_IRQn);
+
+  HAL_NVIC_DisableIRQ(XSPI3_IRQn);
+  NVIC_ClearPendingIRQ(XSPI3_IRQn);
+}
+
 void App_RunLoopIteration(void)
 {
   uint32_t now = HAL_GetTick();
+
+  App_TryRecoverVl53l0x(now);
+  App_UpdateObstacleMonitor(now);
 
   if (app_cartesian_trajectory.active)
   {
@@ -888,6 +927,198 @@ static uint32_t App_CartesianTrajectoryComputeDurationMs(const RobotArmVector3 *
   }
 
   return duration_ms;
+}
+
+static bool App_HasActiveMotion(void)
+{
+  return app_cartesian_trajectory.active || app_servo_trajectory.active || app_servo_demo.active;
+}
+
+static App_ServoMotionSource App_GetActiveMotionSource(void)
+{
+  if (app_cartesian_trajectory.active)
+  {
+    return APP_SERVO_MOTION_SOURCE_XYZ;
+  }
+
+  if (app_servo_trajectory.active)
+  {
+    return app_servo_trajectory.source;
+  }
+
+  if (app_servo_demo.active)
+  {
+    return APP_SERVO_MOTION_SOURCE_DEMO;
+  }
+
+  return APP_SERVO_MOTION_SOURCE_IDLE;
+}
+
+static void App_StopActiveMotionAtCurrentPose(void)
+{
+  RobotArmPose current_pose;
+  App_ServoPulseSet current_pulses = App_ServoGetCurrentPulseSet();
+  uint32_t now = HAL_GetTick();
+
+  app_servo_demo.active = false;
+  app_servo_demo.waiting_between_steps = false;
+  app_servo_demo.step_index = 0U;
+  app_servo_demo.wait_start_tick = 0U;
+
+  app_servo_trajectory.active = false;
+  app_servo_trajectory.source = APP_SERVO_MOTION_SOURCE_IDLE;
+  app_servo_trajectory.start_tick = now;
+  app_servo_trajectory.duration_ms = 0U;
+  app_servo_trajectory.last_update_tick = now;
+  app_servo_trajectory.start_pulses = current_pulses;
+  app_servo_trajectory.target_pulses = current_pulses;
+
+  app_cartesian_trajectory.active = false;
+  app_cartesian_trajectory.start_tick = now;
+  app_cartesian_trajectory.duration_ms = 0U;
+  app_cartesian_trajectory.last_update_tick = now;
+  app_cartesian_trajectory.target_pulses = current_pulses;
+  app_cartesian_trajectory.elbow_mode = ROBOT_ARM_ELBOW_MODE_DOWN;
+  if (App_RobotArmEstimateCurrentPose(&current_pose))
+  {
+    app_cartesian_trajectory.start_position_mm.x_mm = current_pose.x_mm;
+    app_cartesian_trajectory.start_position_mm.y_mm = current_pose.y_mm;
+    app_cartesian_trajectory.start_position_mm.z_mm = current_pose.z_mm;
+    app_cartesian_trajectory.target_position_mm = app_cartesian_trajectory.start_position_mm;
+  }
+  else
+  {
+    app_cartesian_trajectory.start_position_mm.x_mm = 0.0f;
+    app_cartesian_trajectory.start_position_mm.y_mm = 0.0f;
+    app_cartesian_trajectory.start_position_mm.z_mm = 0.0f;
+    app_cartesian_trajectory.target_position_mm = app_cartesian_trajectory.start_position_mm;
+  }
+}
+
+static void App_TryRecoverVl53l0x(uint32_t now)
+{
+  if (phase1_vl53l0x_ready)
+  {
+    return;
+  }
+
+  if ((now - app_last_vl53l0x_recovery_tick) < APP_VL53L0X_RECOVERY_INTERVAL_MS)
+  {
+    return;
+  }
+
+  app_last_vl53l0x_recovery_tick = now;
+  if (!Phase1_IsDeviceReady(VL53L0X_I2C_ADDR_DEFAULT))
+  {
+    return;
+  }
+
+  if (!Phase1_Vl53l0xInit(VL53L0X_I2C_ADDR_DEFAULT))
+  {
+    printf("[vl53l0x] recovery init failed\r\n");
+    return;
+  }
+
+  printf("[vl53l0x] recovery init ok, single-shot ranging ready\r\n");
+  Phase1_LogVl53l0xRange();
+  App_LogRobotArmStatus();
+}
+
+static void App_UpdateObstacleMonitor(uint32_t now)
+{
+  Phase1_Vl53l0xMeasurement measurement;
+  const char *device_status;
+  App_ServoMotionSource interrupted_motion;
+  bool obstacle_now;
+  bool clear_now;
+  bool was_detected;
+  bool motion_active;
+
+  if (!phase1_vl53l0x_ready)
+  {
+    return;
+  }
+
+  if (!App_HasActiveMotion() && !app_obstacle_detected)
+  {
+    return;
+  }
+
+  if (app_obstacle_detected && App_HasActiveMotion())
+  {
+    interrupted_motion = App_GetActiveMotionSource();
+    App_StopActiveMotionAtCurrentPose();
+    printf("[safety] obstacle detected range=%u mm threshold=%u mm clear=%u mm device=%s motion=%s action=stop\r\n",
+           app_obstacle_last_measurement.range_mm,
+           APP_OBSTACLE_STOP_DISTANCE_MM,
+           APP_OBSTACLE_CLEAR_DISTANCE_MM,
+           app_obstacle_has_last_measurement ?
+             Phase1_Vl53l0xDeviceCodeString(app_obstacle_last_measurement.range_status_code) :
+             "latched",
+           App_ServoMotionSourceName(interrupted_motion));
+    App_LogRobotArmStatus();
+  }
+
+  if ((now - app_last_obstacle_monitor_tick) < APP_OBSTACLE_MONITOR_INTERVAL_MS)
+  {
+    return;
+  }
+
+  app_last_obstacle_monitor_tick = now;
+  if (!Phase1_Vl53l0xReadMeasurementInternal(VL53L0X_I2C_ADDR_DEFAULT, &measurement, false))
+  {
+    phase1_vl53l0x_ready = false;
+    return;
+  }
+
+  app_obstacle_last_measurement = measurement;
+  app_obstacle_has_last_measurement = true;
+  was_detected = app_obstacle_detected;
+  motion_active = App_HasActiveMotion();
+  obstacle_now = measurement.range_status_code == VL53L0X_DEVICEERROR_RANGECOMPLETE &&
+                 measurement.range_mm <= APP_OBSTACLE_STOP_DISTANCE_MM;
+  clear_now = measurement.range_status_code == VL53L0X_DEVICEERROR_RANGECOMPLETE &&
+              measurement.range_mm > APP_OBSTACLE_CLEAR_DISTANCE_MM;
+  device_status = Phase1_Vl53l0xDeviceCodeString(measurement.range_status_code);
+
+  if (obstacle_now)
+  {
+    app_obstacle_detected = true;
+    if (motion_active)
+    {
+      interrupted_motion = App_GetActiveMotionSource();
+      App_StopActiveMotionAtCurrentPose();
+      printf("[safety] obstacle detected range=%u mm threshold=%u mm clear=%u mm device=%s motion=%s action=stop\r\n",
+             measurement.range_mm,
+             APP_OBSTACLE_STOP_DISTANCE_MM,
+             APP_OBSTACLE_CLEAR_DISTANCE_MM,
+             device_status,
+             App_ServoMotionSourceName(interrupted_motion));
+      App_LogRobotArmStatus();
+    }
+    else if (!was_detected)
+    {
+      printf("[safety] obstacle detected range=%u mm threshold=%u mm clear=%u mm device=%s\r\n",
+             measurement.range_mm,
+             APP_OBSTACLE_STOP_DISTANCE_MM,
+             APP_OBSTACLE_CLEAR_DISTANCE_MM,
+             device_status);
+      App_LogRobotArmStatus();
+    }
+
+    return;
+  }
+
+  if (was_detected && clear_now)
+  {
+    app_obstacle_detected = false;
+    printf("[safety] obstacle cleared range=%u mm threshold=%u mm clear=%u mm device=%s\r\n",
+           measurement.range_mm,
+           APP_OBSTACLE_STOP_DISTANCE_MM,
+           APP_OBSTACLE_CLEAR_DISTANCE_MM,
+           device_status);
+    App_LogRobotArmStatus();
+  }
 }
 
 static float App_MinimumJerkBlend(uint32_t elapsed_ms, uint32_t duration_ms)
@@ -1658,6 +1889,31 @@ static void App_LogRobotArmStatus(void)
          target_pulses.gripper_lift_pulse_us,
          target_pulses.left_right_pulse_us);
 
+  if (!phase1_vl53l0x_ready)
+  {
+    printf("[status] obstacle=disabled range=0 mm threshold=%u mm clear=%u mm device=sensor-not-ready\r\n",
+           APP_OBSTACLE_STOP_DISTANCE_MM,
+           APP_OBSTACLE_CLEAR_DISTANCE_MM);
+  }
+  else if (!app_obstacle_has_last_measurement)
+  {
+    printf("[status] obstacle=unknown range=0 mm threshold=%u mm clear=%u mm device=no-data\r\n",
+           APP_OBSTACLE_STOP_DISTANCE_MM,
+           APP_OBSTACLE_CLEAR_DISTANCE_MM);
+  }
+  else
+  {
+    const char *obstacle_state = app_obstacle_detected ? "detected" :
+                                 (app_obstacle_last_measurement.range_status_code == VL53L0X_DEVICEERROR_RANGECOMPLETE ? "clear" : "unknown");
+
+    printf("[status] obstacle=%s range=%u mm threshold=%u mm clear=%u mm device=%s\r\n",
+           obstacle_state,
+           app_obstacle_last_measurement.range_mm,
+           APP_OBSTACLE_STOP_DISTANCE_MM,
+           APP_OBSTACLE_CLEAR_DISTANCE_MM,
+           Phase1_Vl53l0xDeviceCodeString(app_obstacle_last_measurement.range_status_code));
+  }
+
   if (app_cartesian_trajectory.active)
   {
     printf("[status] cartesian target_xyz x=%ld y=%ld z=%ld mm elbow=%s\r\n",
@@ -2302,15 +2558,91 @@ static bool Phase1_IsDeviceReady(uint8_t address)
   return HAL_I2C_IsDeviceReady(&hi2c1, (uint16_t)(address << 1), 2U, 10U) == HAL_OK;
 }
 
+static void Phase1_RecoverI2cBus(void)
+{
+  GPIO_InitTypeDef gpio_init = {0};
+  uint32_t i;
+
+  /* Reset I2C peripheral and release pin AF so we can drive them manually. */
+  HAL_I2C_DeInit(&hi2c1);
+  __HAL_RCC_I2C1_FORCE_RESET();
+  HAL_Delay(2U);
+  __HAL_RCC_I2C1_RELEASE_RESET();
+
+  /* Ensure clocks are on (may already be, but harmless). */
+  __HAL_RCC_GPIOC_CLK_ENABLE();
+  __HAL_RCC_GPIOH_CLK_ENABLE();
+
+  /* Pre-set both lines high before switching mode to avoid a spurious START. */
+  HAL_GPIO_WritePin(APP_I2C1_SCL_GPIO_Port, APP_I2C1_SCL_Pin, GPIO_PIN_SET);
+  HAL_GPIO_WritePin(APP_I2C1_SDA_GPIO_Port, APP_I2C1_SDA_Pin, GPIO_PIN_SET);
+
+  gpio_init.Mode  = GPIO_MODE_OUTPUT_OD;
+  gpio_init.Pull  = GPIO_NOPULL;
+  gpio_init.Speed = GPIO_SPEED_FREQ_LOW;
+
+  gpio_init.Pin = APP_I2C1_SCL_Pin;
+  HAL_GPIO_Init(APP_I2C1_SCL_GPIO_Port, &gpio_init);
+
+  gpio_init.Pin = APP_I2C1_SDA_Pin;
+  HAL_GPIO_Init(APP_I2C1_SDA_GPIO_Port, &gpio_init);
+
+  /*
+   * Clock out any slave that is stuck mid-transaction (holding SDA low).
+   * Toggle SCL up to 9 times; stop early once SDA is released.
+   */
+  for (i = 0U; i < 9U; ++i)
+  {
+    if (HAL_GPIO_ReadPin(APP_I2C1_SDA_GPIO_Port, APP_I2C1_SDA_Pin) == GPIO_PIN_SET)
+    {
+      break;
+    }
+
+    HAL_GPIO_WritePin(APP_I2C1_SCL_GPIO_Port, APP_I2C1_SCL_Pin, GPIO_PIN_RESET);
+    HAL_Delay(1U);
+    HAL_GPIO_WritePin(APP_I2C1_SCL_GPIO_Port, APP_I2C1_SCL_Pin, GPIO_PIN_SET);
+    HAL_Delay(1U);
+  }
+
+  /* Generate a STOP condition: SDA low -> high while SCL is high. */
+  HAL_GPIO_WritePin(APP_I2C1_SDA_GPIO_Port, APP_I2C1_SDA_Pin, GPIO_PIN_RESET);
+  HAL_Delay(1U);
+  HAL_GPIO_WritePin(APP_I2C1_SCL_GPIO_Port, APP_I2C1_SCL_Pin, GPIO_PIN_SET);
+  HAL_Delay(1U);
+  HAL_GPIO_WritePin(APP_I2C1_SDA_GPIO_Port, APP_I2C1_SDA_Pin, GPIO_PIN_SET);
+  HAL_Delay(1U);
+
+  /* Restore SCL and SDA to I2C alternate-function open-drain. */
+  gpio_init.Mode = GPIO_MODE_AF_OD;
+
+  gpio_init.Pin       = APP_I2C1_SCL_Pin;
+  gpio_init.Alternate = APP_I2C1_SCL_AF;
+  HAL_GPIO_Init(APP_I2C1_SCL_GPIO_Port, &gpio_init);
+
+  gpio_init.Pin       = APP_I2C1_SDA_Pin;
+  gpio_init.Alternate = APP_I2C1_SDA_AF;
+  HAL_GPIO_Init(APP_I2C1_SDA_GPIO_Port, &gpio_init);
+
+  /* Reinitialize the I2C peripheral with original settings. */
+  HAL_I2C_Init(&hi2c1);
+  HAL_I2CEx_ConfigAnalogFilter(&hi2c1, I2C_ANALOGFILTER_ENABLE);
+}
+
 static bool Phase1_WriteRegister8(uint8_t address, uint8_t register_address, uint8_t value)
 {
-  return HAL_I2C_Mem_Write(&hi2c1,
-                           (uint16_t)(address << 1),
-                           register_address,
-                           I2C_MEMADD_SIZE_8BIT,
-                           &value,
-                           1U,
-                           PHASE1_I2C_TIMEOUT_MS) == HAL_OK;
+  if (HAL_I2C_Mem_Write(&hi2c1,
+                         (uint16_t)(address << 1),
+                         register_address,
+                         I2C_MEMADD_SIZE_8BIT,
+                         &value,
+                         1U,
+                         PHASE1_I2C_TIMEOUT_MS) == HAL_OK)
+  {
+    return true;
+  }
+
+  Phase1_RecoverI2cBus();
+  return false;
 }
 
 static bool Phase1_ReadRegister8(uint8_t address, uint8_t register_address, uint8_t *value)
@@ -2320,13 +2652,19 @@ static bool Phase1_ReadRegister8(uint8_t address, uint8_t register_address, uint
 
 static bool Phase1_ReadRegisters(uint8_t address, uint8_t register_address, uint8_t *buffer, uint16_t length)
 {
-  return HAL_I2C_Mem_Read(&hi2c1,
-                          (uint16_t)(address << 1),
-                          register_address,
-                          I2C_MEMADD_SIZE_8BIT,
-                          buffer,
-                          length,
-                          PHASE1_I2C_TIMEOUT_MS) == HAL_OK;
+  if (HAL_I2C_Mem_Read(&hi2c1,
+                        (uint16_t)(address << 1),
+                        register_address,
+                        I2C_MEMADD_SIZE_8BIT,
+                        buffer,
+                        length,
+                        PHASE1_I2C_TIMEOUT_MS) == HAL_OK)
+  {
+    return true;
+  }
+
+  Phase1_RecoverI2cBus();
+  return false;
 }
 
 static bool Phase1_ReadRegister16(uint8_t address, uint8_t register_address, uint16_t *value)
@@ -2480,50 +2818,132 @@ static bool Phase1_Vl53l0xInit(uint8_t address)
 {
   uint8_t value = 0U;
 
-  if (!Phase1_ReadRegister8(address, VL53L0X_MODEL_ID_REG, &value) || value != VL53L0X_MODEL_ID_VALUE)
+  if (!Phase1_ReadRegister8(address, VL53L0X_MODEL_ID_REG, &value))
   {
+    printf("[vl53l0x] init failed step=model-id-read reg=0x%02X i2c_err=0x%08lX\r\n",
+           VL53L0X_MODEL_ID_REG,
+           (unsigned long)HAL_I2C_GetError(&hi2c1));
+    return false;
+  }
+
+  if (value != VL53L0X_MODEL_ID_VALUE)
+  {
+    printf("[vl53l0x] init failed step=model-id-validate reg=0x%02X expected=0x%02X actual=0x%02X\r\n",
+           VL53L0X_MODEL_ID_REG,
+           VL53L0X_MODEL_ID_VALUE,
+           value);
     return false;
   }
 
   if (!Phase1_ReadRegister8(address, VL53L0X_VHV_CONFIG_PAD_SCL_SDA_EXTSUP_HV_REG, &value))
   {
+    printf("[vl53l0x] init failed step=extsup-read reg=0x%02X i2c_err=0x%08lX\r\n",
+           VL53L0X_VHV_CONFIG_PAD_SCL_SDA_EXTSUP_HV_REG,
+           (unsigned long)HAL_I2C_GetError(&hi2c1));
     return false;
   }
 
   if (!Phase1_WriteRegister8(address, VL53L0X_VHV_CONFIG_PAD_SCL_SDA_EXTSUP_HV_REG, (uint8_t)(value | 0x01U)))
   {
+    printf("[vl53l0x] init failed step=extsup-write reg=0x%02X value=0x%02X i2c_err=0x%08lX\r\n",
+           VL53L0X_VHV_CONFIG_PAD_SCL_SDA_EXTSUP_HV_REG,
+           (uint8_t)(value | 0x01U),
+           (unsigned long)HAL_I2C_GetError(&hi2c1));
     return false;
   }
 
-  if (!Phase1_WriteRegister8(address, VL53L0X_PRIVATE_STANDARD_MODE_REG, 0x00U) ||
-      !Phase1_WriteRegister8(address, VL53L0X_PRIVATE_INIT_REG, 0x01U) ||
-      !Phase1_WriteRegister8(address, VL53L0X_PRIVATE_PAGE_SELECT_REG, 0x01U) ||
-      !Phase1_WriteRegister8(address, 0x00U, 0x00U))
+  if (!Phase1_WriteRegister8(address, VL53L0X_PRIVATE_STANDARD_MODE_REG, 0x00U))
   {
+    printf("[vl53l0x] init failed step=private-standard-mode reg=0x%02X value=0x00 i2c_err=0x%08lX\r\n",
+           VL53L0X_PRIVATE_STANDARD_MODE_REG,
+           (unsigned long)HAL_I2C_GetError(&hi2c1));
+    return false;
+  }
+
+  if (!Phase1_WriteRegister8(address, VL53L0X_PRIVATE_INIT_REG, 0x01U))
+  {
+    printf("[vl53l0x] init failed step=private-init-enter reg=0x%02X value=0x01 i2c_err=0x%08lX\r\n",
+           VL53L0X_PRIVATE_INIT_REG,
+           (unsigned long)HAL_I2C_GetError(&hi2c1));
+    return false;
+  }
+
+  if (!Phase1_WriteRegister8(address, VL53L0X_PRIVATE_PAGE_SELECT_REG, 0x01U))
+  {
+    printf("[vl53l0x] init failed step=page-select-1 reg=0x%02X value=0x01 i2c_err=0x%08lX\r\n",
+           VL53L0X_PRIVATE_PAGE_SELECT_REG,
+           (unsigned long)HAL_I2C_GetError(&hi2c1));
+    return false;
+  }
+
+  if (!Phase1_WriteRegister8(address, 0x00U, 0x00U))
+  {
+    printf("[vl53l0x] init failed step=page-1-select-zero reg=0x00 value=0x00 i2c_err=0x%08lX\r\n",
+           (unsigned long)HAL_I2C_GetError(&hi2c1));
     return false;
   }
 
   if (!Phase1_ReadRegister8(address, VL53L0X_PRIVATE_STOP_VARIABLE_REG, &phase1_vl53l0x_stop_variable))
   {
+    printf("[vl53l0x] init failed step=stop-variable-read reg=0x%02X i2c_err=0x%08lX\r\n",
+           VL53L0X_PRIVATE_STOP_VARIABLE_REG,
+           (unsigned long)HAL_I2C_GetError(&hi2c1));
     return false;
   }
 
-  if (!Phase1_WriteRegister8(address, 0x00U, 0x01U) ||
-      !Phase1_WriteRegister8(address, VL53L0X_PRIVATE_PAGE_SELECT_REG, 0x00U) ||
-      !Phase1_WriteRegister8(address, VL53L0X_PRIVATE_INIT_REG, 0x00U) ||
-      !Phase1_WriteRegister8(address, VL53L0X_SYSTEM_INTERRUPT_CONFIG_GPIO_REG, 0x04U))
+  if (!Phase1_WriteRegister8(address, 0x00U, 0x01U))
   {
+    printf("[vl53l0x] init failed step=page-1-select-one reg=0x00 value=0x01 i2c_err=0x%08lX\r\n",
+           (unsigned long)HAL_I2C_GetError(&hi2c1));
+    return false;
+  }
+
+  if (!Phase1_WriteRegister8(address, VL53L0X_PRIVATE_PAGE_SELECT_REG, 0x00U))
+  {
+    printf("[vl53l0x] init failed step=page-select-0 reg=0x%02X value=0x00 i2c_err=0x%08lX\r\n",
+           VL53L0X_PRIVATE_PAGE_SELECT_REG,
+           (unsigned long)HAL_I2C_GetError(&hi2c1));
+    return false;
+  }
+
+  if (!Phase1_WriteRegister8(address, VL53L0X_PRIVATE_INIT_REG, 0x00U))
+  {
+    printf("[vl53l0x] init failed step=private-init-exit reg=0x%02X value=0x00 i2c_err=0x%08lX\r\n",
+           VL53L0X_PRIVATE_INIT_REG,
+           (unsigned long)HAL_I2C_GetError(&hi2c1));
+    return false;
+  }
+
+  if (!Phase1_WriteRegister8(address, VL53L0X_SYSTEM_INTERRUPT_CONFIG_GPIO_REG, 0x04U))
+  {
+    printf("[vl53l0x] init failed step=irq-config reg=0x%02X value=0x04 i2c_err=0x%08lX\r\n",
+           VL53L0X_SYSTEM_INTERRUPT_CONFIG_GPIO_REG,
+           (unsigned long)HAL_I2C_GetError(&hi2c1));
     return false;
   }
 
   if (!Phase1_ReadRegister8(address, VL53L0X_GPIO_HV_MUX_ACTIVE_HIGH_REG, &value))
   {
+    printf("[vl53l0x] init failed step=gpio-hv-read reg=0x%02X i2c_err=0x%08lX\r\n",
+           VL53L0X_GPIO_HV_MUX_ACTIVE_HIGH_REG,
+           (unsigned long)HAL_I2C_GetError(&hi2c1));
     return false;
   }
 
-  if (!Phase1_WriteRegister8(address, VL53L0X_GPIO_HV_MUX_ACTIVE_HIGH_REG, (uint8_t)(value & ~0x10U)) ||
-      !Phase1_WriteRegister8(address, VL53L0X_SYSTEM_INTERRUPT_CLEAR_REG, 0x01U))
+  if (!Phase1_WriteRegister8(address, VL53L0X_GPIO_HV_MUX_ACTIVE_HIGH_REG, (uint8_t)(value & ~0x10U)))
   {
+    printf("[vl53l0x] init failed step=gpio-hv-write reg=0x%02X value=0x%02X i2c_err=0x%08lX\r\n",
+           VL53L0X_GPIO_HV_MUX_ACTIVE_HIGH_REG,
+           (uint8_t)(value & ~0x10U),
+           (unsigned long)HAL_I2C_GetError(&hi2c1));
+    return false;
+  }
+
+  if (!Phase1_WriteRegister8(address, VL53L0X_SYSTEM_INTERRUPT_CLEAR_REG, 0x01U))
+  {
+    printf("[vl53l0x] init failed step=irq-clear reg=0x%02X value=0x01 i2c_err=0x%08lX\r\n",
+           VL53L0X_SYSTEM_INTERRUPT_CLEAR_REG,
+           (unsigned long)HAL_I2C_GetError(&hi2c1));
     return false;
   }
 
@@ -2531,23 +2951,31 @@ static bool Phase1_Vl53l0xInit(uint8_t address)
   return true;
 }
 
-static bool Phase1_Vl53l0xReadMeasurement(uint8_t address, Phase1_Vl53l0xMeasurement *measurement)
+static bool Phase1_Vl53l0xReadMeasurementInternal(uint8_t address,
+                                                  Phase1_Vl53l0xMeasurement *measurement,
+                                                  bool log_failures)
 {
   uint8_t status = 0U;
   uint32_t start_tick = HAL_GetTick();
 
   if (!Phase1_Vl53l0xPrepareSingleShot(address))
   {
-    printf("[vl53l0x] prepare single-shot failed i2c_err=0x%08lX stop=0x%02X\r\n",
-           (unsigned long)hi2c1.ErrorCode,
-           phase1_vl53l0x_stop_variable);
+    if (log_failures)
+    {
+      printf("[vl53l0x] prepare single-shot failed i2c_err=0x%08lX stop=0x%02X\r\n",
+             (unsigned long)hi2c1.ErrorCode,
+             phase1_vl53l0x_stop_variable);
+    }
     return false;
   }
 
   if (!Phase1_WriteRegister8(address, VL53L0X_SYSRANGE_START_REG, 0x01U))
   {
-    printf("[vl53l0x] start single-shot failed i2c_err=0x%08lX\r\n",
-           (unsigned long)hi2c1.ErrorCode);
+    if (log_failures)
+    {
+      printf("[vl53l0x] start single-shot failed i2c_err=0x%08lX\r\n",
+             (unsigned long)hi2c1.ErrorCode);
+    }
     return false;
   }
 
@@ -2555,8 +2983,11 @@ static bool Phase1_Vl53l0xReadMeasurement(uint8_t address, Phase1_Vl53l0xMeasure
   {
     if (!Phase1_ReadRegister8(address, VL53L0X_SYSRANGE_START_REG, &status))
     {
-      printf("[vl53l0x] poll start failed i2c_err=0x%08lX\r\n",
-             (unsigned long)hi2c1.ErrorCode);
+      if (log_failures)
+      {
+        printf("[vl53l0x] poll start failed i2c_err=0x%08lX\r\n",
+               (unsigned long)hi2c1.ErrorCode);
+      }
       return false;
     }
 
@@ -2567,9 +2998,12 @@ static bool Phase1_Vl53l0xReadMeasurement(uint8_t address, Phase1_Vl53l0xMeasure
 
     if ((HAL_GetTick() - start_tick) >= PHASE1_VL53L0X_MEASUREMENT_TIMEOUT_MS)
     {
-      printf("[vl53l0x] start timeout sysrange=0x%02X elapsed=%lu ms\r\n",
-             status,
-             (unsigned long)(HAL_GetTick() - start_tick));
+      if (log_failures)
+      {
+        printf("[vl53l0x] start timeout sysrange=0x%02X elapsed=%lu ms\r\n",
+               status,
+               (unsigned long)(HAL_GetTick() - start_tick));
+      }
       return false;
     }
   }
@@ -2579,8 +3013,11 @@ static bool Phase1_Vl53l0xReadMeasurement(uint8_t address, Phase1_Vl53l0xMeasure
   {
     if (!Phase1_ReadRegister8(address, VL53L0X_RESULT_INTERRUPT_STATUS_REG, &status))
     {
-      printf("[vl53l0x] poll interrupt failed i2c_err=0x%08lX\r\n",
-             (unsigned long)hi2c1.ErrorCode);
+      if (log_failures)
+      {
+        printf("[vl53l0x] poll interrupt failed i2c_err=0x%08lX\r\n",
+               (unsigned long)hi2c1.ErrorCode);
+      }
       return false;
     }
 
@@ -2591,9 +3028,12 @@ static bool Phase1_Vl53l0xReadMeasurement(uint8_t address, Phase1_Vl53l0xMeasure
 
     if ((HAL_GetTick() - start_tick) >= PHASE1_VL53L0X_MEASUREMENT_TIMEOUT_MS)
     {
-      printf("[vl53l0x] interrupt timeout irq=0x%02X elapsed=%lu ms\r\n",
-             status,
-             (unsigned long)(HAL_GetTick() - start_tick));
+      if (log_failures)
+      {
+        printf("[vl53l0x] interrupt timeout irq=0x%02X elapsed=%lu ms\r\n",
+               status,
+               (unsigned long)(HAL_GetTick() - start_tick));
+      }
       return false;
     }
   }
@@ -2602,14 +3042,22 @@ static bool Phase1_Vl53l0xReadMeasurement(uint8_t address, Phase1_Vl53l0xMeasure
       !Phase1_ReadRegister16(address, (uint8_t)(VL53L0X_RESULT_RANGE_STATUS_REG + 10U), &measurement->range_mm) ||
       !Phase1_WriteRegister8(address, VL53L0X_SYSTEM_INTERRUPT_CLEAR_REG, 0x01U))
   {
-    printf("[vl53l0x] readout failed i2c_err=0x%08lX\r\n",
-           (unsigned long)hi2c1.ErrorCode);
+    if (log_failures)
+    {
+      printf("[vl53l0x] readout failed i2c_err=0x%08lX\r\n",
+             (unsigned long)hi2c1.ErrorCode);
+    }
     return false;
   }
 
   measurement->range_status_code = (uint8_t)((measurement->range_status_raw >> 3) & 0x0FU);
 
   return true;
+}
+
+static bool Phase1_Vl53l0xReadMeasurement(uint8_t address, Phase1_Vl53l0xMeasurement *measurement)
+{
+  return Phase1_Vl53l0xReadMeasurementInternal(address, measurement, true);
 }
 
 static const char *Phase1_Vl53l0xDeviceCodeString(uint8_t device_code)
@@ -2686,8 +3134,12 @@ static void Phase1_LogVl53l0xRange(void)
 
   if (!Phase1_Vl53l0xReadMeasurement(VL53L0X_I2C_ADDR_DEFAULT, &measurement))
   {
+    phase1_vl53l0x_ready = false;
     return;
   }
+
+  app_obstacle_last_measurement = measurement;
+  app_obstacle_has_last_measurement = true;
 
   if (phase1_vl53l0x_has_last_range)
   {
@@ -2735,6 +3187,12 @@ static void Phase1_LogI2CScan(void)
   phase1_vl53l0x_ready = false;
   phase1_vl53l0x_has_last_range = false;
   phase1_vl53l0x_last_range_mm = 0U;
+  app_obstacle_has_last_measurement = false;
+  app_obstacle_detected = false;
+  app_last_vl53l0x_recovery_tick = HAL_GetTick();
+  app_obstacle_last_measurement.range_mm = 0U;
+  app_obstacle_last_measurement.range_status_raw = 0U;
+  app_obstacle_last_measurement.range_status_code = 0U;
 
   printf("[i2c] scanning 7-bit addresses on I2C1...\r\n");
 
