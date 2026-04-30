@@ -13,9 +13,9 @@ static void App_DisableUnexpectedXspiIrq(IRQn_Type irqn)
   __ISB();
 }
 
-void LPUART1_IRQHandler(void)
+void USART3_IRQHandler(void)
 {
-  App_LPUART1_IRQHandler();
+  App_USART3_IRQHandler();
 }
 
 void XSPI1_IRQHandler(void)

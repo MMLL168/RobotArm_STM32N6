@@ -68,12 +68,12 @@
 #define APP_LD3_GREEN_GPIO_Port GPIOG
 #define APP_USER_BUTTON_Pin GPIO_PIN_13
 #define APP_USER_BUTTON_GPIO_Port GPIOC
-#define APP_VCP_TX_Pin GPIO_PIN_5
-#define APP_VCP_TX_GPIO_Port GPIOE
-#define APP_VCP_TX_AF GPIO_AF3_LPUART1
-#define APP_VCP_RX_Pin GPIO_PIN_6
-#define APP_VCP_RX_GPIO_Port GPIOE
-#define APP_VCP_RX_AF GPIO_AF3_LPUART1
+#define APP_VCP_TX_Pin GPIO_PIN_8
+#define APP_VCP_TX_GPIO_Port GPIOD
+#define APP_VCP_TX_AF GPIO_AF7_USART3
+#define APP_VCP_RX_Pin GPIO_PIN_9
+#define APP_VCP_RX_GPIO_Port GPIOD
+#define APP_VCP_RX_AF GPIO_AF7_USART3
 
 #define MPU6050_I2C_ADDR_AD0_LOW 0x68U
 #define MPU6050_I2C_ADDR_AD0_HIGH 0x69U
@@ -245,7 +245,7 @@ typedef struct
   RobotArmElbowMode elbow_mode;
 } App_CartesianTrajectory;
 
-static UART_HandleTypeDef hlpuart1;
+static UART_HandleTypeDef huart3;
 static uint8_t phase1_mpu6050_address = 0U;
 static bool phase1_mpu6050_ready = false;
 static bool phase1_vl53l0x_ready = false;
@@ -318,7 +318,7 @@ static const char *const app_servo_demo_step_labels[] = {
   "gripper_lift up"
 };
 
-static void App_LPUART1_UART_Init(void);
+static void App_USART3_UART_Init(void);
 static void App_GPIO_Init(void);
 static bool App_ServoConfigureTimer(TIM_HandleTypeDef *timer_handle, const char *timer_name);
 static bool App_ServoConfigureTiming(void);
@@ -399,7 +399,7 @@ static RobotArmIkStatus App_RobotArmSolveSafeIk(const RobotArmVector3 *target_po
 static void App_RobotArmApplyJointAngles(const RobotArmJointAngles *joint_angles);
 static bool App_RobotArmMoveToTarget(const RobotArmVector3 *target_position);
 static void App_LogRobotArmStatus(void);
-static void App_LPUART1_StartReceiveIT(void);
+static void App_USART3_StartReceiveIT(void);
 static void App_ProcessSerialInput(void);
 static void App_ClearInheritedInterruptState(void);
 static void App_LcdInit(void);
@@ -455,7 +455,7 @@ int __io_putchar(int ch)
 
   app_uart_tx_ring_buffer[write_index] = (uint8_t)ch;
   app_uart_tx_ring_write_index = next_write_index;
-  __HAL_UART_ENABLE_IT(&hlpuart1, UART_IT_TXE);
+  __HAL_UART_ENABLE_IT(&huart3, UART_IT_TXE);
   return ch;
 }
 
@@ -482,7 +482,7 @@ void App_Init(void)
 {
   App_ClearInheritedInterruptState();
   App_GPIO_Init();
-  App_LPUART1_UART_Init();
+  App_USART3_UART_Init();
   App_LcdInit();
 
   if (!App_ServoInit())
@@ -2688,9 +2688,9 @@ static void App_ProcessSerialInput(void)
   }
 }
 
-static void App_LPUART1_StartReceiveIT(void)
+static void App_USART3_StartReceiveIT(void)
 {
-  HAL_StatusTypeDef status = HAL_UART_Receive_IT(&hlpuart1, &app_uart_rx_byte, 1U);
+  HAL_StatusTypeDef status = HAL_UART_Receive_IT(&huart3, &app_uart_rx_byte, 1U);
 
   if (status != HAL_OK && status != HAL_BUSY)
   {
@@ -2698,58 +2698,58 @@ static void App_LPUART1_StartReceiveIT(void)
   }
 }
 
-void App_LPUART1_IRQHandler(void)
+void App_USART3_IRQHandler(void)
 {
   /* Drain TX ringbuffer while FIFO has space and we have data. */
-  if (__HAL_UART_GET_IT_SOURCE(&hlpuart1, UART_IT_TXE) != RESET)
+  if (__HAL_UART_GET_IT_SOURCE(&huart3, UART_IT_TXE) != RESET)
   {
-    while (__HAL_UART_GET_FLAG(&hlpuart1, UART_FLAG_TXE) != RESET &&
+    while (__HAL_UART_GET_FLAG(&huart3, UART_FLAG_TXE) != RESET &&
            app_uart_tx_ring_read_index != app_uart_tx_ring_write_index)
     {
-      hlpuart1.Instance->TDR = app_uart_tx_ring_buffer[app_uart_tx_ring_read_index];
+      huart3.Instance->TDR = app_uart_tx_ring_buffer[app_uart_tx_ring_read_index];
       app_uart_tx_ring_read_index =
         (uint16_t)((app_uart_tx_ring_read_index + 1U) % APP_UART_TX_RING_BUFFER_LENGTH);
     }
 
     if (app_uart_tx_ring_read_index == app_uart_tx_ring_write_index)
     {
-      __HAL_UART_DISABLE_IT(&hlpuart1, UART_IT_TXE);
+      __HAL_UART_DISABLE_IT(&huart3, UART_IT_TXE);
     }
   }
 
-  HAL_UART_IRQHandler(&hlpuart1);
+  HAL_UART_IRQHandler(&huart3);
 }
 
 void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
 {
-  if (huart == NULL || huart->Instance != LPUART1)
+  if (huart == NULL || huart->Instance != USART3)
   {
     return;
   }
 
   App_QueueSerialByteFromISR(app_uart_rx_byte);
-  App_LPUART1_StartReceiveIT();
+  App_USART3_StartReceiveIT();
 }
 
 void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart)
 {
-  if (huart == NULL || huart->Instance != LPUART1)
+  if (huart == NULL || huart->Instance != USART3)
   {
     return;
   }
 
   __HAL_UART_CLEAR_FLAG(huart, UART_CLEAR_OREF | UART_CLEAR_NEF | UART_CLEAR_PEF | UART_CLEAR_FEF);
-  App_LPUART1_StartReceiveIT();
+  App_USART3_StartReceiveIT();
 }
 
 void HAL_UART_MspInit(UART_HandleTypeDef *huart)
 {
   GPIO_InitTypeDef GPIO_InitStruct = {0};
 
-  if (huart->Instance == LPUART1)
+  if (huart->Instance == USART3)
   {
-    __HAL_RCC_GPIOE_CLK_ENABLE();
-    __HAL_RCC_LPUART1_CLK_ENABLE();
+    __HAL_RCC_GPIOD_CLK_ENABLE();
+    __HAL_RCC_USART3_CLK_ENABLE();
 
     GPIO_InitStruct.Pin = APP_VCP_TX_Pin | APP_VCP_RX_Pin;
     GPIO_InitStruct.Mode = GPIO_MODE_AF_PP;
@@ -2758,51 +2758,51 @@ void HAL_UART_MspInit(UART_HandleTypeDef *huart)
     GPIO_InitStruct.Alternate = APP_VCP_TX_AF;
     HAL_GPIO_Init(APP_VCP_TX_GPIO_Port, &GPIO_InitStruct);
 
-    HAL_NVIC_SetPriority(LPUART1_IRQn, 0U, 0U);
-    HAL_NVIC_EnableIRQ(LPUART1_IRQn);
+    HAL_NVIC_SetPriority(USART3_IRQn, 0U, 0U);
+    HAL_NVIC_EnableIRQ(USART3_IRQn);
   }
 }
 
 void HAL_UART_MspDeInit(UART_HandleTypeDef *huart)
 {
-  if (huart->Instance == LPUART1)
+  if (huart->Instance == USART3)
   {
     HAL_GPIO_DeInit(APP_VCP_TX_GPIO_Port, APP_VCP_TX_Pin | APP_VCP_RX_Pin);
-    HAL_NVIC_DisableIRQ(LPUART1_IRQn);
-    __HAL_RCC_LPUART1_CLK_DISABLE();
+    HAL_NVIC_DisableIRQ(USART3_IRQn);
+    __HAL_RCC_USART3_CLK_DISABLE();
   }
 }
 
-static void App_LPUART1_UART_Init(void)
+static void App_USART3_UART_Init(void)
 {
-  hlpuart1.Instance = LPUART1;
-  hlpuart1.Init.BaudRate = 115200;
-  hlpuart1.Init.WordLength = UART_WORDLENGTH_8B;
-  hlpuart1.Init.StopBits = UART_STOPBITS_1;
-  hlpuart1.Init.Parity = UART_PARITY_NONE;
-  hlpuart1.Init.Mode = UART_MODE_TX_RX;
-  hlpuart1.Init.HwFlowCtl = UART_HWCONTROL_NONE;
-  hlpuart1.Init.OverSampling = UART_OVERSAMPLING_8;
-  hlpuart1.Init.OneBitSampling = UART_ONE_BIT_SAMPLE_DISABLE;
-  hlpuart1.Init.ClockPrescaler = UART_PRESCALER_DIV1;
-  hlpuart1.AdvancedInit.AdvFeatureInit = UART_ADVFEATURE_NO_INIT;
+  huart3.Instance = USART3;
+  huart3.Init.BaudRate = 115200;
+  huart3.Init.WordLength = UART_WORDLENGTH_8B;
+  huart3.Init.StopBits = UART_STOPBITS_1;
+  huart3.Init.Parity = UART_PARITY_NONE;
+  huart3.Init.Mode = UART_MODE_TX_RX;
+  huart3.Init.HwFlowCtl = UART_HWCONTROL_NONE;
+  huart3.Init.OverSampling = UART_OVERSAMPLING_8;
+  huart3.Init.OneBitSampling = UART_ONE_BIT_SAMPLE_DISABLE;
+  huart3.Init.ClockPrescaler = UART_PRESCALER_DIV1;
+  huart3.AdvancedInit.AdvFeatureInit = UART_ADVFEATURE_NO_INIT;
 
-  if (HAL_UART_Init(&hlpuart1) != HAL_OK)
+  if (HAL_UART_Init(&huart3) != HAL_OK)
   {
     Error_Handler();
   }
 
-  if (HAL_UARTEx_SetTxFifoThreshold(&hlpuart1, UART_TXFIFO_THRESHOLD_1_8) != HAL_OK)
+  if (HAL_UARTEx_SetTxFifoThreshold(&huart3, UART_TXFIFO_THRESHOLD_1_8) != HAL_OK)
   {
     Error_Handler();
   }
 
-  if (HAL_UARTEx_SetRxFifoThreshold(&hlpuart1, UART_RXFIFO_THRESHOLD_1_8) != HAL_OK)
+  if (HAL_UARTEx_SetRxFifoThreshold(&huart3, UART_RXFIFO_THRESHOLD_1_8) != HAL_OK)
   {
     Error_Handler();
   }
 
-  if (HAL_UARTEx_DisableFifoMode(&hlpuart1) != HAL_OK)
+  if (HAL_UARTEx_DisableFifoMode(&huart3) != HAL_OK)
   {
     Error_Handler();
   }
@@ -2810,7 +2810,7 @@ static void App_LPUART1_UART_Init(void)
   app_uart_rx_ring_read_index = 0U;
   app_uart_rx_ring_write_index = 0U;
   app_uart_rx_ring_overflow = false;
-  App_LPUART1_StartReceiveIT();
+  App_USART3_StartReceiveIT();
 }
 
 static void App_GPIO_Init(void)
@@ -2850,7 +2850,7 @@ static void Phase0_SetLedState(GPIO_TypeDef *gpio_port, uint16_t gpio_pin, bool 
 static void Phase0_LogStartup(bool button_pressed)
 {
   printf("\r\n[phase0] minimal system ready\r\n");
-  printf("[phase0] uart: LPUART1 115200 8N1 on PE5/PE6\r\n");
+  printf("[phase0] uart: USART3 115200 8N1 on PE5/PE6\r\n");
   printf("[phase0] led: LD3 heartbeat, LD2 mirrors button\r\n");
   printf("[phase0] button: initial state is %s\r\n", button_pressed ? "pressed" : "released");
   printf("[phase0] button: short press runs one full-range sweep across all 4 axes\r\n");
