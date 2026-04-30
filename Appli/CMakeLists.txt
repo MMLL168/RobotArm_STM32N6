@@ -68,6 +68,7 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/ili9341.c
     ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/ili9486.c
     ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/robot_arm_kinematics.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/ov7670.c
 )
 
 # Link directories setup

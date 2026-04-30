@@ -1,4 +1,5 @@
 #include "app_main.h"
+#include "ov7670.h"
 
 #include "i2c.h"
 #define APP_LCD_TYPE 9486
@@ -489,6 +490,8 @@ void App_Init(void)
   {
     Error_Handler();
   }
+
+  OV7670_Init();
 
   app_button_pressed = Phase0_IsButtonPressed();
   app_last_button_pressed = app_button_pressed;
