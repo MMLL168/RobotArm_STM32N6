@@ -99,7 +99,7 @@ bool ILI9341_Init(void)
   ILI9341_WriteDataByte(0x55U);
 
   ILI9341_WriteCommand(ILI9341_CMD_MADCTL);
-  ILI9341_WriteDataByte(0x48U);
+  ILI9341_WriteDataByte(0x88U);
 
   ILI9341_WriteCommand(ILI9341_CMD_INVON);
   ILI9341_WriteCommand(ILI9341_CMD_DISPON);

@@ -99,7 +99,7 @@ bool ILI9486_Init(void)
   ILI9486_WriteDataByte(0x55U);
 
   ILI9486_WriteCommand(ILI9486_CMD_MADCTL);
-  ILI9486_WriteDataByte(0x48U);
+  ILI9486_WriteDataByte(0x88U);
 
   ILI9486_WriteCommand(ILI9486_CMD_INVON);
   ILI9486_WriteCommand(ILI9486_CMD_DISPON);
