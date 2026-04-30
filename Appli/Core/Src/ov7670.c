@@ -131,7 +131,7 @@ static const OV7670_RegEntry s_init_regs[] =
   { 0x91, 0x00 }, { 0x96, 0x00 }, { 0x9A, 0x00 },
   { 0xB0, 0x84 }, { 0xB1, 0x0C }, { 0xB2, 0x0E },
   { 0xB3, 0x82 }, { 0xB8, 0x0A },
-  { REG_END, 0x00 }  /* End of table */
+  { REG_END, 0xFF }  /* End of table */
 };
 
 /* ========================================================================== */
@@ -304,8 +304,10 @@ bool OV7670_Init(void)
 
     if (r == REG_END)
     {
-      if (written == 0U) { break; }  /* actual end sentinel */
-      /* delay sentinel (REG_END used as pseudo-NOP in first entry) */
+      if (v == 0xFFU) {
+        break; /* Let's define the real end sentinel as { REG_END, 0xFF } */
+      }
+      /* Otherwise it's a delay sentinel */
       HAL_Delay(30);
       continue;
     }
