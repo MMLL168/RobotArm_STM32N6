@@ -1,5 +1,7 @@
 #include "app_main.h"
 
+#include "i2c.h"
+#include "ili9341.h"
 #include "main.h"
 #include "robot_arm_kinematics.h"
 #include "tim.h"
@@ -12,11 +14,11 @@
 #include <stdio.h>
 #include <string.h>
 
-#define APP_I2C1_SDA_Pin GPIO_PIN_1
-#define APP_I2C1_SDA_GPIO_Port GPIOC
+#define APP_I2C1_SDA_Pin I2C1_SDA_Pin
+#define APP_I2C1_SDA_GPIO_Port I2C1_SDA_GPIO_Port
 #define APP_I2C1_SDA_AF GPIO_AF4_I2C1
-#define APP_I2C1_SCL_Pin GPIO_PIN_9
-#define APP_I2C1_SCL_GPIO_Port GPIOH
+#define APP_I2C1_SCL_Pin I2CA_SCL_Pin
+#define APP_I2C1_SCL_GPIO_Port I2CA_SCL_GPIO_Port
 #define APP_I2C1_SCL_AF GPIO_AF4_I2C1
 #define APP_LD1_BLUE_Pin GPIO_PIN_8
 #define APP_LD1_BLUE_GPIO_Port GPIOG
@@ -95,6 +97,7 @@
 #define APP_SAFE_WORKSPACE_SAMPLES_PER_JOINT 25U
 #define APP_UART_COMMAND_BUFFER_LENGTH 96U
 #define APP_UART_RX_RING_BUFFER_LENGTH 256U
+#define APP_UART_TX_RING_BUFFER_LENGTH 4096U
 #define APP_SERVO_TRAJECTORY_UPDATE_INTERVAL_MS 20U
 #define APP_SERVO_TRAJECTORY_MIN_DURATION_MS 180U
 #define APP_SERVO_TRAJECTORY_MAX_DURATION_MS 2200U
@@ -103,6 +106,10 @@
 #define APP_OBSTACLE_STOP_DISTANCE_MM 120U
 #define APP_OBSTACLE_CLEAR_HYSTERESIS_MM 20U
 #define APP_OBSTACLE_CLEAR_DISTANCE_MM (APP_OBSTACLE_STOP_DISTANCE_MM + APP_OBSTACLE_CLEAR_HYSTERESIS_MM)
+#define APP_IMU_MONITOR_INTERVAL_MS 100U
+#define APP_IMU_LEVEL_DEG 5
+#define APP_IMU_TILT_DEG 30
+#define APP_IMU_SHAKING_MDPS 8000U
 #define APP_SERVO_TRAJECTORY_CLAMP_SPEED_US_PER_S 1800U
 #define APP_SERVO_TRAJECTORY_FORE_AFT_SPEED_US_PER_S 900U
 #define APP_SERVO_TRAJECTORY_GRIPPER_LIFT_SPEED_US_PER_S 700U
@@ -112,6 +119,10 @@
 #define APP_ROBOT_ARM_SHOULDER_LENGTH_MM 95.0f
 #define APP_ROBOT_ARM_FOREARM_LENGTH_MM 90.0f
 #define APP_ROBOT_ARM_TOOL_LENGTH_MM 55.0f
+#define APP_LCD_UPDATE_INTERVAL_MS 500U
+#define APP_LCD_STATUS_HEIGHT 96U
+#define APP_LCD_CAMERA_Y APP_LCD_STATUS_HEIGHT
+#define APP_LCD_CAMERA_HEIGHT (ILI9341_HEIGHT - APP_LCD_CAMERA_Y)
 
 typedef enum
 {
@@ -194,7 +205,6 @@ typedef struct
   RobotArmElbowMode elbow_mode;
 } App_CartesianTrajectory;
 
-static I2C_HandleTypeDef hi2c1;
 static UART_HandleTypeDef hlpuart1;
 static uint8_t phase1_mpu6050_address = 0U;
 static bool phase1_mpu6050_ready = false;
@@ -208,8 +218,10 @@ static Phase1_Vl53l0xMeasurement app_obstacle_last_measurement = { 0U, 0U, 0U };
 static uint32_t app_last_blink_tick = 0U;
 static uint32_t app_last_heartbeat_tick = 0U;
 static uint32_t app_last_sensor_tick = 0U;
+static uint32_t app_last_lcd_tick = 0U;
 static uint32_t app_last_obstacle_monitor_tick = 0U;
 static uint32_t app_last_vl53l0x_recovery_tick = 0U;
+static uint32_t app_last_imu_monitor_tick = 0U;
 static uint32_t app_last_button_toggle_tick = 0U;
 static uint32_t app_button_press_tick = 0U;
 static bool app_button_pressed = false;
@@ -228,9 +240,17 @@ static uint8_t app_uart_rx_ring_buffer[APP_UART_RX_RING_BUFFER_LENGTH];
 static volatile uint16_t app_uart_rx_ring_read_index = 0U;
 static volatile uint16_t app_uart_rx_ring_write_index = 0U;
 static volatile bool app_uart_rx_ring_overflow = false;
+static uint8_t app_uart_tx_ring_buffer[APP_UART_TX_RING_BUFFER_LENGTH];
+static volatile uint16_t app_uart_tx_ring_read_index = 0U;
+static volatile uint16_t app_uart_tx_ring_write_index = 0U;
 static char app_uart_command_buffer[APP_UART_COMMAND_BUFFER_LENGTH];
 static uint16_t app_uart_command_length = 0U;
 static bool app_uart_command_overflow = false;
+static bool app_lcd_ready = false;
+static bool app_camera_frame_seen = false;
+static uint32_t app_camera_frame_count = 0U;
+static uint16_t app_camera_frame_width = 0U;
+static uint16_t app_camera_frame_height = 0U;
 
 static const App_ServoPulseSet app_servo_demo_steps[] = {
   { APP_CLAMP_SERVO_OPEN_PULSE_US, APP_FORE_AFT_SERVO_CENTER_PULSE_US, APP_GRIPPER_LIFT_SERVO_UP_PULSE_US, APP_LEFT_RIGHT_SERVO_RIGHT_PULSE_US },
@@ -259,7 +279,6 @@ static const char *const app_servo_demo_step_labels[] = {
 };
 
 static void App_LPUART1_UART_Init(void);
-static void App_I2C1_Init(void);
 static void App_GPIO_Init(void);
 static bool App_ServoConfigureTimer(TIM_HandleTypeDef *timer_handle, const char *timer_name);
 static bool App_ServoConfigureTiming(void);
@@ -291,6 +310,9 @@ static App_ServoMotionSource App_GetActiveMotionSource(void);
 static void App_StopActiveMotionAtCurrentPose(void);
 static void App_TryRecoverVl53l0x(uint32_t now);
 static void App_UpdateObstacleMonitor(uint32_t now);
+static void App_PublishObstacleStatus(const char *state, uint16_t range_mm, const char *device);
+static void App_UpdateImuMonitor(uint32_t now);
+static void App_PublishImuStatus(const char *state, int pitch_deg, int roll_deg, uint32_t gyro_mag_mdps, int temp_dc);
 static float App_MinimumJerkBlend(uint32_t elapsed_ms, uint32_t duration_ms);
 static uint16_t App_InterpolatePulse(uint16_t start_pulse_us, uint16_t target_pulse_us, float blend);
 static bool App_ServoTrajectoryStart(const App_ServoPulseSet *target_pulses,
@@ -340,6 +362,11 @@ static void App_LogRobotArmStatus(void);
 static void App_LPUART1_StartReceiveIT(void);
 static void App_ProcessSerialInput(void);
 static void App_ClearInheritedInterruptState(void);
+static void App_LcdInit(void);
+static void App_LcdDrawStaticLayout(void);
+static void App_LcdUpdate(uint32_t now);
+static void App_LcdDrawDashboard(void);
+static void App_LcdDrawCameraPlaceholder(void);
 static void App_QueueSerialByteFromISR(uint8_t received_byte);
 static bool App_DequeueSerialByte(uint8_t *received_byte_out);
 static void App_HandleSerialByte(uint8_t received_byte);
@@ -377,8 +404,18 @@ static void Phase1_LogSensorTelemetry(void);
 
 int __io_putchar(int ch)
 {
-  uint8_t data = (uint8_t)ch;
-  HAL_UART_Transmit(&hlpuart1, &data, 1U, HAL_MAX_DELAY);
+  uint16_t write_index = app_uart_tx_ring_write_index;
+  uint16_t next_write_index = (uint16_t)((write_index + 1U) % APP_UART_TX_RING_BUFFER_LENGTH);
+
+  while (next_write_index == app_uart_tx_ring_read_index)
+  {
+    /* buffer full; UART TX IRQ will drain — yield to it */
+    __WFI();
+  }
+
+  app_uart_tx_ring_buffer[write_index] = (uint8_t)ch;
+  app_uart_tx_ring_write_index = next_write_index;
+  __HAL_UART_ENABLE_IT(&hlpuart1, UART_IT_TXE);
   return ch;
 }
 
@@ -406,7 +443,7 @@ void App_Init(void)
   App_ClearInheritedInterruptState();
   App_GPIO_Init();
   App_LPUART1_UART_Init();
-  App_I2C1_Init();
+  App_LcdInit();
 
   if (!App_ServoInit())
   {
@@ -418,8 +455,10 @@ void App_Init(void)
   app_last_blink_tick = HAL_GetTick();
   app_last_heartbeat_tick = app_last_blink_tick;
   app_last_sensor_tick = app_last_blink_tick;
+  app_last_lcd_tick = app_last_blink_tick;
   app_last_obstacle_monitor_tick = app_last_blink_tick;
   app_last_vl53l0x_recovery_tick = app_last_blink_tick;
+  app_last_imu_monitor_tick = app_last_blink_tick;
   app_last_button_toggle_tick = 0U;
   app_button_press_tick = 0U;
 
@@ -428,6 +467,8 @@ void App_Init(void)
   Phase0_LogStartup(app_button_pressed);
   Phase1_LogI2CScan();
   App_LogRobotArmKinematicsModel();
+  App_LcdDrawStaticLayout();
+  App_LcdDrawDashboard();
 }
 
 static void App_ClearInheritedInterruptState(void)
@@ -443,12 +484,235 @@ static void App_ClearInheritedInterruptState(void)
   NVIC_ClearPendingIRQ(XSPI3_IRQn);
 }
 
+void App_DisplayCameraFrameRgb565(const uint16_t *pixels, uint16_t width, uint16_t height, uint16_t stride_pixels)
+{
+  uint16_t draw_width = width;
+  uint16_t draw_height = height;
+  uint16_t x = 0U;
+  uint16_t y = APP_LCD_CAMERA_Y;
+
+  if (!app_lcd_ready || pixels == NULL || width == 0U || height == 0U)
+  {
+    return;
+  }
+
+  if (draw_width > ILI9341_WIDTH)
+  {
+    draw_width = ILI9341_WIDTH;
+  }
+
+  if (draw_height > APP_LCD_CAMERA_HEIGHT)
+  {
+    draw_height = APP_LCD_CAMERA_HEIGHT;
+  }
+
+  if (draw_width < ILI9341_WIDTH)
+  {
+    x = (uint16_t)((ILI9341_WIDTH - draw_width) / 2U);
+  }
+
+  if (draw_height < APP_LCD_CAMERA_HEIGHT)
+  {
+    y = (uint16_t)(APP_LCD_CAMERA_Y + ((APP_LCD_CAMERA_HEIGHT - draw_height) / 2U));
+  }
+
+  ILI9341_FillRect(0U, APP_LCD_CAMERA_Y, ILI9341_WIDTH, APP_LCD_CAMERA_HEIGHT, ILI9341_COLOR_BLACK);
+  ILI9341_DrawRgb565Image(x, y, draw_width, draw_height, pixels, stride_pixels);
+  app_camera_frame_seen = true;
+  app_camera_frame_width = width;
+  app_camera_frame_height = height;
+  ++app_camera_frame_count;
+}
+
+static void App_LcdInit(void)
+{
+  app_lcd_ready = ILI9341_Init();
+  if (app_lcd_ready)
+  {
+    printf("[lcd] ili9341 init ok spi=SPI5 size=%ux%u\r\n", ILI9341_WIDTH, ILI9341_HEIGHT);
+  }
+  else
+  {
+    printf("[lcd] ili9341 init failed\r\n");
+  }
+}
+
+static void App_LcdDrawStaticLayout(void)
+{
+  if (!app_lcd_ready)
+  {
+    return;
+  }
+
+  ILI9341_FillScreen(ILI9341_COLOR_BLACK);
+  ILI9341_FillRect(0U, 0U, ILI9341_WIDTH, 18U, ILI9341_COLOR_BLUE);
+  ILI9341_DrawString(4U, 4U, "ROBOT ARM", ILI9341_COLOR_WHITE, ILI9341_COLOR_BLUE, 1U);
+  ILI9341_DrawString(168U, 4U, "ILI9341", ILI9341_COLOR_WHITE, ILI9341_COLOR_BLUE, 1U);
+  ILI9341_FillRect(0U, (uint16_t)(APP_LCD_CAMERA_Y - 2U), ILI9341_WIDTH, 2U, ILI9341_COLOR_GRAY);
+  App_LcdDrawCameraPlaceholder();
+}
+
+static void App_LcdUpdate(uint32_t now)
+{
+  if (!app_lcd_ready)
+  {
+    return;
+  }
+
+  if ((now - app_last_lcd_tick) < APP_LCD_UPDATE_INTERVAL_MS)
+  {
+    return;
+  }
+
+  app_last_lcd_tick = now;
+  App_LcdDrawDashboard();
+}
+
+#define APP_LCD_LINE_FIELD_CHARS 36U
+#define APP_LCD_LINE_BUFFER_LEN  (APP_LCD_LINE_FIELD_CHARS + 1U)
+
+static void App_LcdUpdateLine(uint16_t y, char *cache, const char *text, uint16_t color)
+{
+  char padded[APP_LCD_LINE_BUFFER_LEN];
+  size_t len = strlen(text);
+
+  if (len >= APP_LCD_LINE_FIELD_CHARS)
+  {
+    len = APP_LCD_LINE_FIELD_CHARS;
+  }
+  memcpy(padded, text, len);
+  for (size_t i = len; i < APP_LCD_LINE_FIELD_CHARS; ++i)
+  {
+    padded[i] = ' ';
+  }
+  padded[APP_LCD_LINE_FIELD_CHARS] = '\0';
+
+  if (strcmp(padded, cache) == 0)
+  {
+    return;
+  }
+
+  ILI9341_DrawString(4U, y, padded, color, ILI9341_COLOR_BLACK, 1U);
+  memcpy(cache, padded, APP_LCD_LINE_BUFFER_LEN);
+}
+
+static void App_LcdDrawDashboard(void)
+{
+  static char cache_mpu[APP_LCD_LINE_BUFFER_LEN] = "";
+  static char cache_range[APP_LCD_LINE_BUFFER_LEN] = "";
+  static char cache_xyz[APP_LCD_LINE_BUFFER_LEN] = "";
+  static char cache_pwm[APP_LCD_LINE_BUFFER_LEN] = "";
+  static char cache_cam[APP_LCD_LINE_BUFFER_LEN] = "";
+  static bool last_obstacle_detected = false;
+  static bool first_draw = true;
+
+  char line[48];
+  RobotArmPose pose;
+  Phase1_Mpu6050RawSample sample;
+  bool has_pose = App_RobotArmEstimateCurrentPose(&pose);
+  bool has_mpu = phase1_mpu6050_ready && Phase1_Mpu6050ReadRawSample(phase1_mpu6050_address, &sample);
+
+  if (!app_lcd_ready)
+  {
+    return;
+  }
+
+  if (has_mpu)
+  {
+    long ax_mg = ((long)sample.accel_x * 1000L) / PHASE1_MPU6050_ACCEL_LSB_PER_G;
+    long ay_mg = ((long)sample.accel_y * 1000L) / PHASE1_MPU6050_ACCEL_LSB_PER_G;
+    long az_mg = ((long)sample.accel_z * 1000L) / PHASE1_MPU6050_ACCEL_LSB_PER_G;
+    snprintf(line, sizeof(line), "MPU A %ld %ld %ld", ax_mg, ay_mg, az_mg);
+  }
+  else
+  {
+    snprintf(line, sizeof(line), "MPU NO DATA");
+  }
+  App_LcdUpdateLine(24U, cache_mpu, line, ILI9341_COLOR_CYAN);
+
+  if (app_obstacle_has_last_measurement)
+  {
+    snprintf(line,
+             sizeof(line),
+             "RANGE %uMM %s",
+             app_obstacle_last_measurement.range_mm,
+             app_obstacle_detected ? "STOP" : "CLEAR");
+  }
+  else
+  {
+    snprintf(line, sizeof(line), "RANGE NO DATA");
+  }
+  /* obstacle color flips between RED/GREEN; force redraw when it toggles */
+  if (last_obstacle_detected != app_obstacle_detected || first_draw)
+  {
+    cache_range[0] = '\0';
+    last_obstacle_detected = app_obstacle_detected;
+  }
+  App_LcdUpdateLine(40U, cache_range, line,
+                    app_obstacle_detected ? ILI9341_COLOR_RED : ILI9341_COLOR_GREEN);
+
+  if (has_pose)
+  {
+    snprintf(line,
+             sizeof(line),
+             "XYZ %ld %ld %ld",
+             App_RoundFloatToLong(pose.x_mm),
+             App_RoundFloatToLong(pose.y_mm),
+             App_RoundFloatToLong(pose.z_mm));
+  }
+  else
+  {
+    snprintf(line, sizeof(line), "XYZ NO DATA");
+  }
+  App_LcdUpdateLine(56U, cache_xyz, line, ILI9341_COLOR_YELLOW);
+
+  snprintf(line,
+           sizeof(line),
+           "PWM %u %u %u %u",
+           app_clamp_servo_current_pulse_us,
+           app_fore_aft_servo_current_pulse_us,
+           app_gripper_lift_servo_current_pulse_us,
+           app_left_right_servo_current_pulse_us);
+  App_LcdUpdateLine(72U, cache_pwm, line, ILI9341_COLOR_WHITE);
+
+  if (!app_camera_frame_seen)
+  {
+    if (first_draw)
+    {
+      App_LcdDrawCameraPlaceholder();
+    }
+  }
+  else
+  {
+    snprintf(line, sizeof(line), "CAM %ux%u #%lu",
+             app_camera_frame_width, app_camera_frame_height,
+             (unsigned long)app_camera_frame_count);
+    App_LcdUpdateLine(APP_LCD_CAMERA_Y, cache_cam, line, ILI9341_COLOR_GREEN);
+  }
+
+  first_draw = false;
+}
+
+static void App_LcdDrawCameraPlaceholder(void)
+{
+  if (!app_lcd_ready)
+  {
+    return;
+  }
+
+  ILI9341_FillRect(0U, APP_LCD_CAMERA_Y, ILI9341_WIDTH, APP_LCD_CAMERA_HEIGHT, ILI9341_COLOR_DARK);
+  ILI9341_DrawString(18U, (uint16_t)(APP_LCD_CAMERA_Y + 34U), "OV7670 CAMERA", ILI9341_COLOR_WHITE, ILI9341_COLOR_DARK, 2U);
+  ILI9341_DrawString(30U, (uint16_t)(APP_LCD_CAMERA_Y + 62U), "WAITING FRAME", ILI9341_COLOR_ORANGE, ILI9341_COLOR_DARK, 2U);
+  ILI9341_DrawString(16U, (uint16_t)(APP_LCD_CAMERA_Y + 104U), "CALL APP DISPLAYCAMERAFRAMERGB565", ILI9341_COLOR_GRAY, ILI9341_COLOR_DARK, 1U);
+}
+
 void App_RunLoopIteration(void)
 {
   uint32_t now = HAL_GetTick();
 
   App_TryRecoverVl53l0x(now);
   App_UpdateObstacleMonitor(now);
+  App_UpdateImuMonitor(now);
 
   if (app_cartesian_trajectory.active)
   {
@@ -460,6 +724,7 @@ void App_RunLoopIteration(void)
   }
   App_UpdateServoDemo(now);
   App_ProcessSerialInput();
+  App_LcdUpdate(now);
   app_button_pressed = Phase0_IsButtonPressed();
 
   if ((now - app_last_blink_tick) >= 500U)
@@ -1024,6 +1289,16 @@ static void App_TryRecoverVl53l0x(uint32_t now)
   App_LogRobotArmStatus();
 }
 
+static void App_PublishObstacleStatus(const char *state, uint16_t range_mm, const char *device)
+{
+  printf("[status] obstacle=%s range=%u mm threshold=%u mm clear=%u mm device=%s\r\n",
+         state,
+         range_mm,
+         APP_OBSTACLE_STOP_DISTANCE_MM,
+         APP_OBSTACLE_CLEAR_DISTANCE_MM,
+         device);
+}
+
 static void App_UpdateObstacleMonitor(uint32_t now)
 {
   Phase1_Vl53l0xMeasurement measurement;
@@ -1033,18 +1308,9 @@ static void App_UpdateObstacleMonitor(uint32_t now)
   bool clear_now;
   bool was_detected;
   bool motion_active;
+  const char *publish_state;
 
-  if (!phase1_vl53l0x_ready)
-  {
-    return;
-  }
-
-  if (!App_HasActiveMotion() && !app_obstacle_detected)
-  {
-    return;
-  }
-
-  if (app_obstacle_detected && App_HasActiveMotion())
+  if (phase1_vl53l0x_ready && app_obstacle_detected && App_HasActiveMotion())
   {
     interrupted_motion = App_GetActiveMotionSource();
     App_StopActiveMotionAtCurrentPose();
@@ -1063,11 +1329,39 @@ static void App_UpdateObstacleMonitor(uint32_t now)
   {
     return;
   }
-
   app_last_obstacle_monitor_tick = now;
+
+  if (!phase1_vl53l0x_ready)
+  {
+    App_PublishObstacleStatus("disabled", 0U, "sensor-not-ready");
+    return;
+  }
+
   if (!Phase1_Vl53l0xReadMeasurementInternal(VL53L0X_I2C_ADDR_DEFAULT, &measurement, false))
   {
     phase1_vl53l0x_ready = false;
+    App_PublishObstacleStatus("disabled", 0U, "read-failed");
+    return;
+  }
+
+  if (measurement.range_status_code != VL53L0X_DEVICEERROR_RANGECOMPLETE)
+  {
+    /* Sporadic device-error reads (TCC, MSRC, sigma-threshold...) report a
+       spec-defined ~20 mm clip that is not a real distance. Keep the last
+       valid range visible to the GUI instead of flickering. */
+    if (app_obstacle_has_last_measurement)
+    {
+      App_PublishObstacleStatus(
+          app_obstacle_detected ? "detected" : "clear",
+          app_obstacle_last_measurement.range_mm,
+          Phase1_Vl53l0xDeviceCodeString(app_obstacle_last_measurement.range_status_code));
+    }
+    else
+    {
+      App_PublishObstacleStatus("unknown",
+                                0U,
+                                Phase1_Vl53l0xDeviceCodeString(measurement.range_status_code));
+    }
     return;
   }
 
@@ -1075,10 +1369,8 @@ static void App_UpdateObstacleMonitor(uint32_t now)
   app_obstacle_has_last_measurement = true;
   was_detected = app_obstacle_detected;
   motion_active = App_HasActiveMotion();
-  obstacle_now = measurement.range_status_code == VL53L0X_DEVICEERROR_RANGECOMPLETE &&
-                 measurement.range_mm <= APP_OBSTACLE_STOP_DISTANCE_MM;
-  clear_now = measurement.range_status_code == VL53L0X_DEVICEERROR_RANGECOMPLETE &&
-              measurement.range_mm > APP_OBSTACLE_CLEAR_DISTANCE_MM;
+  obstacle_now = measurement.range_mm <= APP_OBSTACLE_STOP_DISTANCE_MM;
+  clear_now = measurement.range_mm > APP_OBSTACLE_CLEAR_DISTANCE_MM;
   device_status = Phase1_Vl53l0xDeviceCodeString(measurement.range_status_code);
 
   if (obstacle_now)
@@ -1105,11 +1397,8 @@ static void App_UpdateObstacleMonitor(uint32_t now)
              device_status);
       App_LogRobotArmStatus();
     }
-
-    return;
   }
-
-  if (was_detected && clear_now)
+  else if (was_detected && clear_now)
   {
     app_obstacle_detected = false;
     printf("[safety] obstacle cleared range=%u mm threshold=%u mm clear=%u mm device=%s\r\n",
@@ -1119,6 +1408,106 @@ static void App_UpdateObstacleMonitor(uint32_t now)
            device_status);
     App_LogRobotArmStatus();
   }
+
+  publish_state = app_obstacle_detected ? "detected" : (clear_now ? "clear" : "unknown");
+  App_PublishObstacleStatus(publish_state, measurement.range_mm, device_status);
+}
+
+static void App_PublishImuStatus(const char *state, int pitch_deg, int roll_deg, uint32_t gyro_mag_mdps, int temp_dc)
+{
+  printf("[status] imu=%s pitch=%d roll=%d gyro_mag=%lu temp_dc=%d\r\n",
+         state,
+         pitch_deg,
+         roll_deg,
+         (unsigned long)gyro_mag_mdps,
+         temp_dc);
+}
+
+static void App_UpdateImuMonitor(uint32_t now)
+{
+  Phase1_Mpu6050RawSample sample;
+  long ax_mg;
+  long ay_mg;
+  long az_mg;
+  long gx_mdps;
+  long gy_mdps;
+  long gz_mdps;
+  long temp_centi_c;
+  int temp_dc;
+  float ax_f;
+  float ay_f;
+  float az_f;
+  float pitch_rad;
+  float roll_rad;
+  int pitch_deg;
+  int roll_deg;
+  int pitch_abs;
+  int roll_abs;
+  uint64_t gyro_sq;
+  uint32_t gyro_mag;
+  const char *state;
+
+  if ((now - app_last_imu_monitor_tick) < APP_IMU_MONITOR_INTERVAL_MS)
+  {
+    return;
+  }
+  app_last_imu_monitor_tick = now;
+
+  if (!phase1_mpu6050_ready)
+  {
+    App_PublishImuStatus("disabled", 0, 0, 0U, 0);
+    return;
+  }
+
+  if (!Phase1_Mpu6050ReadRawSample(phase1_mpu6050_address, &sample))
+  {
+    App_PublishImuStatus("disabled", 0, 0, 0U, 0);
+    return;
+  }
+
+  ax_mg = ((long)sample.accel_x * 1000L) / PHASE1_MPU6050_ACCEL_LSB_PER_G;
+  ay_mg = ((long)sample.accel_y * 1000L) / PHASE1_MPU6050_ACCEL_LSB_PER_G;
+  az_mg = ((long)sample.accel_z * 1000L) / PHASE1_MPU6050_ACCEL_LSB_PER_G;
+  gx_mdps = ((long)sample.gyro_x * 1000L) / PHASE1_MPU6050_GYRO_LSB_PER_DPS;
+  gy_mdps = ((long)sample.gyro_y * 1000L) / PHASE1_MPU6050_GYRO_LSB_PER_DPS;
+  gz_mdps = ((long)sample.gyro_z * 1000L) / PHASE1_MPU6050_GYRO_LSB_PER_DPS;
+  temp_centi_c = (((long)sample.temperature_raw) * 100L) / 340L + 3653L;
+  temp_dc = (int)(temp_centi_c >= 0 ? (temp_centi_c + 5L) / 10L : (temp_centi_c - 5L) / 10L);
+
+  ax_f = (float)ax_mg;
+  ay_f = (float)ay_mg;
+  az_f = (float)az_mg;
+  pitch_rad = atan2f(-ax_f, sqrtf((ay_f * ay_f) + (az_f * az_f)));
+  roll_rad = atan2f(ay_f, az_f);
+  pitch_deg = (int)(pitch_rad * (180.0f / 3.14159265f));
+  roll_deg = (int)(roll_rad * (180.0f / 3.14159265f));
+
+  gyro_sq = (uint64_t)((long long)gx_mdps * (long long)gx_mdps +
+                       (long long)gy_mdps * (long long)gy_mdps +
+                       (long long)gz_mdps * (long long)gz_mdps);
+  gyro_mag = (uint32_t)sqrtf((float)gyro_sq);
+
+  pitch_abs = pitch_deg < 0 ? -pitch_deg : pitch_deg;
+  roll_abs = roll_deg < 0 ? -roll_deg : roll_deg;
+
+  if (gyro_mag > APP_IMU_SHAKING_MDPS)
+  {
+    state = "shaking";
+  }
+  else if (pitch_abs > APP_IMU_TILT_DEG || roll_abs > APP_IMU_TILT_DEG)
+  {
+    state = "tilted";
+  }
+  else if (pitch_abs <= APP_IMU_LEVEL_DEG && roll_abs <= APP_IMU_LEVEL_DEG)
+  {
+    state = "level";
+  }
+  else
+  {
+    state = "tilted";
+  }
+
+  App_PublishImuStatus(state, pitch_deg, roll_deg, gyro_mag, temp_dc);
 }
 
 static float App_MinimumJerkBlend(uint32_t elapsed_ms, uint32_t duration_ms)
@@ -1836,36 +2225,59 @@ static bool App_RobotArmMoveToTarget(const RobotArmVector3 *target_position)
   return true;
 }
 
+typedef struct
+{
+  long x_mm;
+  long y_mm;
+  long z_mm;
+  uint16_t clamp_pulse_us;
+  uint16_t fore_aft_pulse_us;
+  uint16_t gripper_lift_pulse_us;
+  uint16_t left_right_pulse_us;
+  App_ServoMotionSource motion_source;
+  bool obstacle_detected;
+  bool vl53l0x_ready;
+  bool valid;
+} App_StatusSnapshot;
+
+static App_StatusSnapshot app_last_logged_status = { 0 };
+static uint32_t app_last_status_log_tick = 0U;
+
+#define APP_STATUS_LOG_HEARTBEAT_MS 5000U
+
+static bool App_StatusSnapshotEqual(const App_StatusSnapshot *a, const App_StatusSnapshot *b)
+{
+  return a->valid && b->valid &&
+         a->x_mm == b->x_mm && a->y_mm == b->y_mm && a->z_mm == b->z_mm &&
+         a->clamp_pulse_us == b->clamp_pulse_us &&
+         a->fore_aft_pulse_us == b->fore_aft_pulse_us &&
+         a->gripper_lift_pulse_us == b->gripper_lift_pulse_us &&
+         a->left_right_pulse_us == b->left_right_pulse_us &&
+         a->motion_source == b->motion_source &&
+         a->obstacle_detected == b->obstacle_detected &&
+         a->vl53l0x_ready == b->vl53l0x_ready;
+}
+
 static void App_LogRobotArmStatus(void)
 {
   RobotArmPose current_pose;
-  RobotArmJointAngles current_angles = App_RobotArmGetCurrentJointAngles();
   App_ServoMotionSource active_motion = APP_SERVO_MOTION_SOURCE_IDLE;
   App_ServoPulseSet target_pulses = App_ServoGetCurrentPulseSet();
   uint32_t remaining_ms = 0U;
+  uint32_t now = HAL_GetTick();
+  App_StatusSnapshot snap;
+  const char *obstacle_state;
+  uint16_t obstacle_range_mm;
 
   if (!App_RobotArmEstimateCurrentPose(&current_pose))
   {
-    printf("[status] current pose estimation failed\r\n");
+    printf("[status] pose estimation failed\r\n");
     return;
   }
 
-  printf("[status] estimated_pose x=%ld y=%ld z=%ld mm q_deg yaw=%ld shoulder=%ld gripper=%ld pulses clamp=%u fore_aft=%u gripper_lift=%u left_right=%u\r\n",
-         App_RoundFloatToLong(current_pose.x_mm),
-         App_RoundFloatToLong(current_pose.y_mm),
-         App_RoundFloatToLong(current_pose.z_mm),
-         App_RoundFloatToLong(App_RadiansToDegrees(current_angles.base_yaw_rad)),
-         App_RoundFloatToLong(App_RadiansToDegrees(current_angles.shoulder_pitch_rad)),
-         App_RoundFloatToLong(App_RadiansToDegrees(current_angles.gripper_lift_pitch_rad)),
-         app_clamp_servo_current_pulse_us,
-         app_fore_aft_servo_current_pulse_us,
-         app_gripper_lift_servo_current_pulse_us,
-         app_left_right_servo_current_pulse_us);
-
   if (app_cartesian_trajectory.active)
   {
-    uint32_t elapsed_ms = HAL_GetTick() - app_cartesian_trajectory.start_tick;
-
+    uint32_t elapsed_ms = now - app_cartesian_trajectory.start_tick;
     active_motion = APP_SERVO_MOTION_SOURCE_XYZ;
     target_pulses = app_cartesian_trajectory.target_pulses;
     remaining_ms = app_cartesian_trajectory.duration_ms > elapsed_ms ?
@@ -1873,55 +2285,58 @@ static void App_LogRobotArmStatus(void)
   }
   else if (app_servo_trajectory.active)
   {
-    uint32_t elapsed_ms = HAL_GetTick() - app_servo_trajectory.start_tick;
-
+    uint32_t elapsed_ms = now - app_servo_trajectory.start_tick;
     active_motion = app_servo_trajectory.source;
     target_pulses = app_servo_trajectory.target_pulses;
     remaining_ms = app_servo_trajectory.duration_ms > elapsed_ms ?
                    (app_servo_trajectory.duration_ms - elapsed_ms) : 0U;
   }
 
-  printf("[status] motion=%s remaining=%lu ms target_pulses clamp=%u fore_aft=%u gripper_lift=%u left_right=%u\r\n",
-         App_ServoMotionSourceName(active_motion),
-         (unsigned long)remaining_ms,
-         target_pulses.clamp_pulse_us,
-         target_pulses.fore_aft_pulse_us,
-         target_pulses.gripper_lift_pulse_us,
-         target_pulses.left_right_pulse_us);
+  snap.x_mm = App_RoundFloatToLong(current_pose.x_mm);
+  snap.y_mm = App_RoundFloatToLong(current_pose.y_mm);
+  snap.z_mm = App_RoundFloatToLong(current_pose.z_mm);
+  snap.clamp_pulse_us = app_clamp_servo_current_pulse_us;
+  snap.fore_aft_pulse_us = app_fore_aft_servo_current_pulse_us;
+  snap.gripper_lift_pulse_us = app_gripper_lift_servo_current_pulse_us;
+  snap.left_right_pulse_us = app_left_right_servo_current_pulse_us;
+  snap.motion_source = active_motion;
+  snap.obstacle_detected = app_obstacle_detected;
+  snap.vl53l0x_ready = phase1_vl53l0x_ready;
+  snap.valid = true;
+
+  if (App_StatusSnapshotEqual(&snap, &app_last_logged_status) &&
+      (now - app_last_status_log_tick) < APP_STATUS_LOG_HEARTBEAT_MS)
+  {
+    return;
+  }
 
   if (!phase1_vl53l0x_ready)
   {
-    printf("[status] obstacle=disabled range=0 mm threshold=%u mm clear=%u mm device=sensor-not-ready\r\n",
-           APP_OBSTACLE_STOP_DISTANCE_MM,
-           APP_OBSTACLE_CLEAR_DISTANCE_MM);
+    obstacle_state = "off";
+    obstacle_range_mm = 0U;
   }
   else if (!app_obstacle_has_last_measurement)
   {
-    printf("[status] obstacle=unknown range=0 mm threshold=%u mm clear=%u mm device=no-data\r\n",
-           APP_OBSTACLE_STOP_DISTANCE_MM,
-           APP_OBSTACLE_CLEAR_DISTANCE_MM);
+    obstacle_state = "no-data";
+    obstacle_range_mm = 0U;
   }
   else
   {
-    const char *obstacle_state = app_obstacle_detected ? "detected" :
-                                 (app_obstacle_last_measurement.range_status_code == VL53L0X_DEVICEERROR_RANGECOMPLETE ? "clear" : "unknown");
-
-    printf("[status] obstacle=%s range=%u mm threshold=%u mm clear=%u mm device=%s\r\n",
-           obstacle_state,
-           app_obstacle_last_measurement.range_mm,
-           APP_OBSTACLE_STOP_DISTANCE_MM,
-           APP_OBSTACLE_CLEAR_DISTANCE_MM,
-           Phase1_Vl53l0xDeviceCodeString(app_obstacle_last_measurement.range_status_code));
+    obstacle_state = app_obstacle_detected ? "STOP" :
+                     (app_obstacle_last_measurement.range_status_code == VL53L0X_DEVICEERROR_RANGECOMPLETE ? "clear" : "unknown");
+    obstacle_range_mm = app_obstacle_last_measurement.range_mm;
   }
 
-  if (app_cartesian_trajectory.active)
-  {
-    printf("[status] cartesian target_xyz x=%ld y=%ld z=%ld mm elbow=%s\r\n",
-           App_RoundFloatToLong(app_cartesian_trajectory.target_position_mm.x_mm),
-           App_RoundFloatToLong(app_cartesian_trajectory.target_position_mm.y_mm),
-           App_RoundFloatToLong(app_cartesian_trajectory.target_position_mm.z_mm),
-           App_ElbowModeName(app_cartesian_trajectory.elbow_mode));
-  }
+  printf("[status] xyz=%ld,%ld,%ld pulse=%u,%u,%u,%u motion=%s remain=%lu obstacle=%s/%umm\r\n",
+         snap.x_mm, snap.y_mm, snap.z_mm,
+         snap.clamp_pulse_us, snap.fore_aft_pulse_us,
+         snap.gripper_lift_pulse_us, snap.left_right_pulse_us,
+         App_ServoMotionSourceName(active_motion),
+         (unsigned long)remaining_ms,
+         obstacle_state, obstacle_range_mm);
+
+  app_last_logged_status = snap;
+  app_last_status_log_tick = now;
 }
 
 static bool App_CommandStartsWith(const char *command_line, const char *command_name)
@@ -2245,6 +2660,23 @@ static void App_LPUART1_StartReceiveIT(void)
 
 void App_LPUART1_IRQHandler(void)
 {
+  /* Drain TX ringbuffer while FIFO has space and we have data. */
+  if (__HAL_UART_GET_IT_SOURCE(&hlpuart1, UART_IT_TXE) != RESET)
+  {
+    while (__HAL_UART_GET_FLAG(&hlpuart1, UART_FLAG_TXE) != RESET &&
+           app_uart_tx_ring_read_index != app_uart_tx_ring_write_index)
+    {
+      hlpuart1.Instance->TDR = app_uart_tx_ring_buffer[app_uart_tx_ring_read_index];
+      app_uart_tx_ring_read_index =
+        (uint16_t)((app_uart_tx_ring_read_index + 1U) % APP_UART_TX_RING_BUFFER_LENGTH);
+    }
+
+    if (app_uart_tx_ring_read_index == app_uart_tx_ring_write_index)
+    {
+      __HAL_UART_DISABLE_IT(&hlpuart1, UART_IT_TXE);
+    }
+  }
+
   HAL_UART_IRQHandler(&hlpuart1);
 }
 
@@ -2268,47 +2700,6 @@ void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart)
 
   __HAL_UART_CLEAR_FLAG(huart, UART_CLEAR_OREF | UART_CLEAR_NEF | UART_CLEAR_PEF | UART_CLEAR_FEF);
   App_LPUART1_StartReceiveIT();
-}
-
-void HAL_I2C_MspInit(I2C_HandleTypeDef *hi2c)
-{
-  GPIO_InitTypeDef GPIO_InitStruct = {0};
-  RCC_PeriphCLKInitTypeDef PeriphClkInitStruct = {0};
-
-  if (hi2c->Instance == I2C1)
-  {
-    PeriphClkInitStruct.PeriphClockSelection = RCC_PERIPHCLK_I2C1;
-    PeriphClkInitStruct.I2c1ClockSelection = RCC_I2C1CLKSOURCE_PCLK1;
-    if (HAL_RCCEx_PeriphCLKConfig(&PeriphClkInitStruct) != HAL_OK)
-    {
-      Error_Handler();
-    }
-
-    __HAL_RCC_GPIOC_CLK_ENABLE();
-    __HAL_RCC_GPIOH_CLK_ENABLE();
-    __HAL_RCC_I2C1_CLK_ENABLE();
-
-    GPIO_InitStruct.Pin = APP_I2C1_SDA_Pin;
-    GPIO_InitStruct.Mode = GPIO_MODE_AF_OD;
-    GPIO_InitStruct.Pull = GPIO_NOPULL;
-    GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
-    GPIO_InitStruct.Alternate = APP_I2C1_SDA_AF;
-    HAL_GPIO_Init(APP_I2C1_SDA_GPIO_Port, &GPIO_InitStruct);
-
-    GPIO_InitStruct.Pin = APP_I2C1_SCL_Pin;
-    GPIO_InitStruct.Alternate = APP_I2C1_SCL_AF;
-    HAL_GPIO_Init(APP_I2C1_SCL_GPIO_Port, &GPIO_InitStruct);
-  }
-}
-
-void HAL_I2C_MspDeInit(I2C_HandleTypeDef *hi2c)
-{
-  if (hi2c->Instance == I2C1)
-  {
-    HAL_GPIO_DeInit(APP_I2C1_SDA_GPIO_Port, APP_I2C1_SDA_Pin);
-    HAL_GPIO_DeInit(APP_I2C1_SCL_GPIO_Port, APP_I2C1_SCL_Pin);
-    __HAL_RCC_I2C1_CLK_DISABLE();
-  }
 }
 
 void HAL_UART_MspInit(UART_HandleTypeDef *huart)
@@ -2380,34 +2771,6 @@ static void App_LPUART1_UART_Init(void)
   app_uart_rx_ring_write_index = 0U;
   app_uart_rx_ring_overflow = false;
   App_LPUART1_StartReceiveIT();
-}
-
-static void App_I2C1_Init(void)
-{
-  hi2c1.Instance = I2C1;
-  hi2c1.Init.Timing = 0x30C0EDFF;
-  hi2c1.Init.OwnAddress1 = 0;
-  hi2c1.Init.AddressingMode = I2C_ADDRESSINGMODE_7BIT;
-  hi2c1.Init.DualAddressMode = I2C_DUALADDRESS_DISABLE;
-  hi2c1.Init.OwnAddress2 = 0;
-  hi2c1.Init.OwnAddress2Masks = I2C_OA2_NOMASK;
-  hi2c1.Init.GeneralCallMode = I2C_GENERALCALL_DISABLE;
-  hi2c1.Init.NoStretchMode = I2C_NOSTRETCH_DISABLE;
-
-  if (HAL_I2C_Init(&hi2c1) != HAL_OK)
-  {
-    Error_Handler();
-  }
-
-  if (HAL_I2CEx_ConfigAnalogFilter(&hi2c1, I2C_ANALOGFILTER_ENABLE) != HAL_OK)
-  {
-    Error_Handler();
-  }
-
-  if (HAL_I2CEx_ConfigDigitalFilter(&hi2c1, 0) != HAL_OK)
-  {
-    Error_Handler();
-  }
 }
 
 static void App_GPIO_Init(void)
@@ -2555,7 +2918,7 @@ static void App_LogRobotArmKinematicsModel(void)
 
 static bool Phase1_IsDeviceReady(uint8_t address)
 {
-  return HAL_I2C_IsDeviceReady(&hi2c1, (uint16_t)(address << 1), 2U, 10U) == HAL_OK;
+  return HAL_I2C_IsDeviceReady(&hi2c1, (uint16_t)(address << 1), 1U, 2U) == HAL_OK;
 }
 
 static void Phase1_RecoverI2cBus(void)
@@ -2623,9 +2986,8 @@ static void Phase1_RecoverI2cBus(void)
   gpio_init.Alternate = APP_I2C1_SDA_AF;
   HAL_GPIO_Init(APP_I2C1_SDA_GPIO_Port, &gpio_init);
 
-  /* Reinitialize the I2C peripheral with original settings. */
-  HAL_I2C_Init(&hi2c1);
-  HAL_I2CEx_ConfigAnalogFilter(&hi2c1, I2C_ANALOGFILTER_ENABLE);
+  /* Reinitialize the I2C peripheral with the CubeMX-generated settings. */
+  MX_I2C1_Init();
 }
 
 static bool Phase1_WriteRegister8(uint8_t address, uint8_t register_address, uint8_t value)

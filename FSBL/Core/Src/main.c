@@ -6,7 +6,7 @@
   ******************************************************************************
   * @attention
   *
-  * Copyright (c) 2026 STMicroelectronics.
+  * Copyright (c) 2025 STMicroelectronics.
   * All rights reserved.
   *
   * This software is licensed under terms that can be found in the LICENSE file
@@ -18,12 +18,10 @@
 /* USER CODE END Header */
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
-#include "i2c.h"
-#include "spi.h"
-#include "gpio.h"
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
+#include "extmem.h"
 
 /* USER CODE END Includes */
 
@@ -44,7 +42,7 @@
 
 /* Private variables ---------------------------------------------------------*/
 
-COM_InitTypeDef BspCOMInit;
+XSPI_HandleTypeDef hxspi2;
 
 /* USER CODE BEGIN PV */
 
@@ -52,9 +50,10 @@ COM_InitTypeDef BspCOMInit;
 
 /* Private function prototypes -----------------------------------------------*/
 void SystemClock_Config(void);
-void PeriphCommonClock_Config(void);
+static void MX_GPIO_Init(void);
+static void MX_XSPI2_Init(void);
 /* USER CODE BEGIN PFP */
-
+void Error_Handler(void);
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
@@ -73,6 +72,14 @@ int main(void)
 
   /* USER CODE END 1 */
 
+  /* Enable the CPU Cache */
+
+  /* Enable I-Cache---------------------------------------------------------*/
+  SCB_EnableICache();
+
+  /* Enable D-Cache---------------------------------------------------------*/
+  SCB_EnableDCache();
+
   /* MCU Configuration--------------------------------------------------------*/
   HAL_Init();
 
@@ -83,45 +90,25 @@ int main(void)
   /* Configure the system clock */
   SystemClock_Config();
 
-  /* Configure the peripherals common clocks */
-  PeriphCommonClock_Config();
-
   /* USER CODE BEGIN SysInit */
-
   /* USER CODE END SysInit */
 
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
-  MX_I2C1_Init();
-  MX_SPI5_Init();
+  MX_XSPI2_Init();
   /* USER CODE BEGIN 2 */
+  /* Initialise the serial memory */
+  MX_EXTMEM_Init();
 
+  BOOT_Application();
+  /* We should never get here as execution is now from user application */
   /* USER CODE END 2 */
-
-  /* Initialize leds */
-  BSP_LED_Init(LED_BLUE);
-  BSP_LED_Init(LED_RED);
-  BSP_LED_Init(LED_GREEN);
-
-  /* Initialize USER push-button, will be used to trigger an interrupt each time it's pressed.*/
-  BSP_PB_Init(BUTTON_USER, BUTTON_MODE_EXTI);
-
-  /* Initialize COM1 port (115200, 8 bits (7-bit data + 1 stop bit), no parity */
-  BspCOMInit.BaudRate   = 115200;
-  BspCOMInit.WordLength = COM_WORDLENGTH_8B;
-  BspCOMInit.StopBits   = COM_STOPBITS_1;
-  BspCOMInit.Parity     = COM_PARITY_NONE;
-  BspCOMInit.HwFlowCtl  = COM_HWCONTROL_NONE;
-  if (BSP_COM_Init(COM1, &BspCOMInit) != BSP_ERROR_NONE)
-  {
-    Error_Handler();
-  }
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
   while (1)
   {
-
+     __NOP();
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
@@ -129,6 +116,34 @@ int main(void)
   /* USER CODE END 3 */
 }
 /* USER CODE BEGIN CLK 1 */
+ /*         The system Clock is configured as follows :
+  *            CPU Clock source               = IC1_CK
+  *            System bus Clock source        = IC2_IC6_IC11_CK
+  *            CPUCLK (sysa_ck) (Hz)          = 600000000
+  *            SYSCLK AXI (sysb_ck) (Hz)      = 400000000
+  *            SYSCLK NPU (sysc_ck) (Hz)      = 300000000
+  *            SYSCLK AXISRAM3/4/5/6 (sysd_ck) (Hz) = 400000000
+  *            HCLKx(Hz)                      = 200000000
+  *            PCLKx(Hz)                      = 200000000
+  *            AHB Prescaler                  = 2
+  *            APB1 Prescaler                 = 1
+  *            APB2 Prescaler                 = 1
+  *            APB4 Prescaler                 = 1
+  *            APB5 Prescaler                 = 1
+  *            PLL1 State                     = ON
+  *            PLL1 clock source              = HSI
+  *            PLL1 M                         = 4
+  *            PLL1 N                         = 75
+  *            PLL1 P1                        = 1
+  *            PLL1 P2                        = 1
+  *            PLL1 FRACN                     = 0
+  *            PLL2 State                     = BYPASS
+  *            PLL2 clock source              = HSI
+  *            PLL3 State                     = BYPASS
+  *            PLL3 clock source              = HSI
+  *            PLL4 State                     = BYPASS
+  *            PLL4 clock source              = HSI
+  */
 /* USER CODE END CLK 1 */
 
 /**
@@ -233,25 +248,76 @@ void SystemClock_Config(void)
 }
 
 /**
-  * @brief Peripherals Common Clock Configuration
+  * @brief XSPI2 Initialization Function
+  * @param None
   * @retval None
   */
-void PeriphCommonClock_Config(void)
+static void MX_XSPI2_Init(void)
 {
-  RCC_PeriphCLKInitTypeDef PeriphClkInitStruct = {0};
 
-  /** Initializes the peripherals clock
-  */
-  PeriphClkInitStruct.PeriphClockSelection = RCC_PERIPHCLK_TIM;
-  PeriphClkInitStruct.TIMPresSelection = RCC_TIMPRES_DIV1;
-  if (HAL_RCCEx_PeriphCLKConfig(&PeriphClkInitStruct) != HAL_OK)
+  /* USER CODE BEGIN XSPI2_Init 0 */
+
+  /* USER CODE END XSPI2_Init 0 */
+
+  XSPIM_CfgTypeDef sXspiManagerCfg = {0};
+
+  /* USER CODE BEGIN XSPI2_Init 1 */
+
+  /* USER CODE END XSPI2_Init 1 */
+  /* XSPI2 parameter configuration*/
+  hxspi2.Instance = XSPI2;
+  hxspi2.Init.FifoThresholdByte = 4;
+  hxspi2.Init.MemoryMode = HAL_XSPI_SINGLE_MEM;
+  hxspi2.Init.MemoryType = HAL_XSPI_MEMTYPE_MACRONIX;
+  hxspi2.Init.MemorySize = HAL_XSPI_SIZE_512MB;
+  hxspi2.Init.ChipSelectHighTimeCycle = 2;
+  hxspi2.Init.FreeRunningClock = HAL_XSPI_FREERUNCLK_DISABLE;
+  hxspi2.Init.ClockMode = HAL_XSPI_CLOCK_MODE_0;
+  hxspi2.Init.WrapSize = HAL_XSPI_WRAP_NOT_SUPPORTED;
+  hxspi2.Init.ClockPrescaler = 0;
+  hxspi2.Init.SampleShifting = HAL_XSPI_SAMPLE_SHIFT_NONE;
+  hxspi2.Init.DelayHoldQuarterCycle = HAL_XSPI_DHQC_ENABLE;
+  hxspi2.Init.ChipSelectBoundary = HAL_XSPI_BONDARYOF_NONE;
+  hxspi2.Init.MaxTran = 0;
+  hxspi2.Init.Refresh = 0;
+  hxspi2.Init.MemorySelect = HAL_XSPI_CSSEL_NCS1;
+  if (HAL_XSPI_Init(&hxspi2) != HAL_OK)
   {
     Error_Handler();
   }
+  sXspiManagerCfg.nCSOverride = HAL_XSPI_CSSEL_OVR_NCS1;
+  sXspiManagerCfg.IOPort = HAL_XSPIM_IOPORT_2;
+  sXspiManagerCfg.Req2AckTime = 1;
+  if (HAL_XSPIM_Config(&hxspi2, &sXspiManagerCfg, HAL_XSPI_TIMEOUT_DEFAULT_VALUE) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN XSPI2_Init 2 */
+
+  /* USER CODE END XSPI2_Init 2 */
+
+}
+
+/**
+  * @brief GPIO Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_GPIO_Init(void)
+{
+  /* USER CODE BEGIN MX_GPIO_Init_1 */
+
+  /* USER CODE END MX_GPIO_Init_1 */
+
+  /* GPIO Ports Clock Enable */
+  __HAL_RCC_GPION_CLK_ENABLE();
+
+  /* USER CODE BEGIN MX_GPIO_Init_2 */
+
+  /* USER CODE END MX_GPIO_Init_2 */
 }
 
 /* USER CODE BEGIN 4 */
-
 /* USER CODE END 4 */
 
 /**
@@ -279,8 +345,17 @@ void Error_Handler(void)
 void assert_failed(uint8_t *file, uint32_t line)
 {
   /* USER CODE BEGIN 6 */
+  /* Prevent unused argument(s) compilation warning */
+  UNUSED(file);
+  UNUSED(line);
+
   /* User can add his own implementation to report the file name and line number,
      ex: printf("Wrong parameters value: file %s on line %d\r\n", file, line) */
+
+  /* Infinite loop */
+  while (1)
+  {
+  }
   /* USER CODE END 6 */
 }
 #endif /* USE_FULL_ASSERT */

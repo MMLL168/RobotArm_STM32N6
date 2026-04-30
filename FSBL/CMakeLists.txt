@@ -39,6 +39,22 @@ add_executable(${CMAKE_PROJECT_NAME})
 # Include mx-generated
 include("mx-generated.cmake")
 
+target_include_directories(stm32cubemx INTERFACE
+    ${CMAKE_CURRENT_SOURCE_DIR}/../Middlewares/ST/STM32_ExtMem_Manager
+    ${CMAKE_CURRENT_SOURCE_DIR}/../Middlewares/ST/STM32_ExtMem_Manager/boot
+    ${CMAKE_CURRENT_SOURCE_DIR}/../Middlewares/ST/STM32_ExtMem_Manager/nor_sfdp
+    ${CMAKE_CURRENT_SOURCE_DIR}/../Middlewares/ST/STM32_ExtMem_Manager/sal
+)
+
+target_sources(STM32_Drivers PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/../Drivers/STM32N6xx_HAL_Driver/Src/stm32n6xx_hal_xspi.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/../Middlewares/ST/STM32_ExtMem_Manager/stm32_extmem.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/../Middlewares/ST/STM32_ExtMem_Manager/boot/stm32_boot_lrun.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/../Middlewares/ST/STM32_ExtMem_Manager/nor_sfdp/stm32_sfdp_data.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/../Middlewares/ST/STM32_ExtMem_Manager/nor_sfdp/stm32_sfdp_driver.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/../Middlewares/ST/STM32_ExtMem_Manager/sal/stm32_sal_xspi.c
+)
+
 
 # In order to use CMake for cross-compiling
 set(CMAKE_CXX_COMPILER_FORCED "true")
@@ -58,7 +74,7 @@ target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE
 
 # Add sources to executable
 target_sources(${CMAKE_PROJECT_NAME} PRIVATE
-    # Add user sources here
+    ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/extmem.c
 )
 
 # Link directories setup
@@ -71,6 +87,12 @@ target_link_libraries(${CMAKE_PROJECT_NAME} PRIVATE
     # Add user defined libraries
 )
 
+if(CMAKE_OBJCOPY)
+    add_custom_command(TARGET ${CMAKE_PROJECT_NAME} POST_BUILD
+        COMMAND ${CMAKE_OBJCOPY} -Obinary $<TARGET_FILE:${CMAKE_PROJECT_NAME}> ${CMAKE_CURRENT_BINARY_DIR}/${CMAKE_PROJECT_NAME}.bin
+    )
+endif()
+
 # Remove wrong libob.a library dependency when using cpp files
 list(REMOVE_ITEM CMAKE_C_IMPLICIT_LINK_LIBRARIES ob)
 
@@ -78,7 +100,6 @@ list(REMOVE_ITEM CMAKE_C_IMPLICIT_LINK_LIBRARIES ob)
 if((CMAKE_C_STANDARD EQUAL 90) OR (CMAKE_C_STANDARD EQUAL 99))
     message(ERROR "Generated code requires C11 or higher")
 endif()
-
 
 
 

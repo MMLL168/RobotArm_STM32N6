@@ -54,9 +54,13 @@ WORKSPACE_PROJECTION_PADDING_RATIO = 0.08
 WORKSPACE_REACTION_TIME_DEFAULT_MS = 120
 WORKSPACE_REACTION_TIME_MIN_MS = 0
 WORKSPACE_REACTION_TIME_MAX_MS = 1000
+TOF_STATUS_POLL_INTERVAL_DEFAULT_MS = 100
+TOF_STATUS_POLL_INTERVAL_MIN_MS = 100
+TOF_STATUS_POLL_INTERVAL_MAX_MS = 2000
+LOG_QUEUE_POLL_INTERVAL_MS = 33
 
-PREVIEW_CANVAS_WIDTH = 560
-PREVIEW_CANVAS_HEIGHT = 360
+PREVIEW_CANVAS_WIDTH = 760
+PREVIEW_CANVAS_HEIGHT = 640
 
 STATUS_POSE_PATTERN = re.compile(
     r"^\[status\] estimated_pose x=(-?\d+) y=(-?\d+) z=(-?\d+) mm q_deg yaw=(-?\d+) shoulder=(-?\d+) gripper=(-?\d+) pulses clamp=(\d+) fore_aft=(\d+) gripper_lift=(\d+) left_right=(\d+)$"
@@ -69,6 +73,9 @@ STATUS_CARTESIAN_PATTERN = re.compile(
 )
 STATUS_OBSTACLE_PATTERN = re.compile(
     r"^\[status\] obstacle=([a-z_]+) range=(\d+) mm threshold=(\d+) mm clear=(\d+) mm device=([a-z\-]+)$"
+)
+STATUS_IMU_PATTERN = re.compile(
+    r"^\[status\] imu=([a-z_]+) pitch=(-?\d+) roll=(-?\d+) gyro_mag=(\d+) temp_dc=(-?\d+)$"
 )
 SAFETY_OBSTACLE_PATTERN = re.compile(
     r"^\[safety\] obstacle (detected|cleared) range=(\d+) mm threshold=(\d+) mm clear=(\d+) mm device=([a-z\-]+)(?: motion=([a-z_]+) action=stop)?$"
@@ -96,8 +103,8 @@ class RobotArmDebugGui(tk.Tk):
     def __init__(self) -> None:
         super().__init__()
         self.title("Robot Arm Debug Tool")
-        self.geometry("1280x820")
-        self.minsize(900, 620)
+        self.geometry("1320x1080")
+        self.minsize(960, 820)
 
         self._workspace_view_azimuth_deg = WORKSPACE_VIEW_DEFAULT_AZIMUTH_DEG
         self._workspace_view_elevation = WORKSPACE_VIEW_DEFAULT_ELEVATION
@@ -115,6 +122,7 @@ class RobotArmDebugGui(tk.Tk):
         self.log_pause_button_var = tk.StringVar(value="Pause Log")
         self.workspace_interaction_mode_var = tk.StringVar(value="Hold Preview / Release Send")
         self.workspace_reaction_time_var = tk.StringVar(value=str(WORKSPACE_REACTION_TIME_DEFAULT_MS))
+        self.status_poll_interval_var = tk.StringVar(value=str(TOF_STATUS_POLL_INTERVAL_DEFAULT_MS))
 
         self.x_var = tk.StringVar(value=str(default_x_mm))
         self.y_var = tk.StringVar(value=str(default_y_mm))
@@ -147,6 +155,12 @@ class RobotArmDebugGui(tk.Tk):
         self._obstacle_threshold_mm = 120
         self._obstacle_clear_mm = 140
         self._obstacle_device_name = "no-data"
+        self._imu_monitor_state = "unknown"
+        self._imu_pitch_deg = 0
+        self._imu_roll_deg = 0
+        self._imu_gyro_mag_mdps = 0
+        self._imu_temp_dc = 0
+        self._imu_device_name = "no-data"
 
         self.serial_port = None
         self._port_mapping = {}
@@ -171,6 +185,7 @@ class RobotArmDebugGui(tk.Tk):
         self.preview_frame = None
         self.workspace_mode_combo = None
         self.workspace_reaction_time_spinbox = None
+        self.status_poll_interval_spinbox = None
         self.firmware_obstacle_label = None
         self.command_layout_mode = None
         self._last_preview_canvas_size = (0, 0)
@@ -193,12 +208,13 @@ class RobotArmDebugGui(tk.Tk):
         self._build_ui()
         self._install_variable_traces()
         self.workspace_interaction_mode_var.trace_add("write", self._handle_workspace_interaction_mode_change)
+        self.status_poll_interval_var.trace_add("write", self._handle_status_poll_interval_change)
         self._update_xyz_entry_states()
         self._refresh_xyz_validation_state()
         self.refresh_ports()
         self._update_workspace_interaction_controls()
         self._update_preview()
-        self.after(100, self._poll_log_queue)
+        self.after(LOG_QUEUE_POLL_INTERVAL_MS, self._poll_log_queue)
         self.protocol("WM_DELETE_WINDOW", self._handle_close)
 
     def _build_ui(self) -> None:
@@ -347,6 +363,22 @@ class RobotArmDebugGui(tk.Tk):
             width=8,
         )
         self.workspace_reaction_time_spinbox.grid(row=0, column=3, pady=0, sticky="w")
+        ttk.Label(workspace_controls_frame, text="TOF Poll (ms)", font=("Segoe UI", 9, "bold")).grid(row=1, column=0, padx=(0, 6), pady=(6, 0), sticky="w")
+        self.status_poll_interval_spinbox = ttk.Spinbox(
+            workspace_controls_frame,
+            from_=TOF_STATUS_POLL_INTERVAL_MIN_MS,
+            to=TOF_STATUS_POLL_INTERVAL_MAX_MS,
+            increment=50,
+            textvariable=self.status_poll_interval_var,
+            width=8,
+        )
+        self.status_poll_interval_spinbox.grid(row=1, column=1, pady=(6, 0), sticky="w")
+        ttk.Label(
+            workspace_controls_frame,
+            text="FW TOF loop is 100 ms, so lower values will not refresh faster.",
+            font=("Segoe UI", 8),
+            justify="left",
+        ).grid(row=1, column=2, columnspan=2, padx=(0, 6), pady=(6, 0), sticky="w")
         ttk.Label(self.preview_frame, textvariable=self.preview_legend_var, wraplength=492, justify="left", font=("Segoe UI", 9)).grid(
             row=2, column=0, sticky="ew", padx=8, pady=(0, 2)
         )
@@ -730,6 +762,26 @@ class RobotArmDebugGui(tk.Tk):
         self.preview_mode_var.set("Local preview follows manual PWM sliders.")
         self._update_preview()
 
+    def _get_status_poll_interval_ms(self) -> int:
+        raw_value = self.status_poll_interval_var.get().strip()
+        try:
+            interval_ms = int(raw_value)
+        except ValueError:
+            interval_ms = TOF_STATUS_POLL_INTERVAL_DEFAULT_MS
+
+        interval_ms = max(TOF_STATUS_POLL_INTERVAL_MIN_MS, min(TOF_STATUS_POLL_INTERVAL_MAX_MS, interval_ms))
+        normalized_value = str(interval_ms)
+        if raw_value != normalized_value:
+            self.status_poll_interval_var.set(normalized_value)
+        return interval_ms
+
+    def _handle_status_poll_interval_change(self, *_args) -> None:
+        interval_ms = self._get_status_poll_interval_ms()
+        if self.serial_port is not None:
+            self._schedule_status_poll(initial_delay_ms=interval_ms)
+        if self.preview_canvas is not None:
+            self._update_preview()
+
     def _create_xyz_entry(self, parent, variable: tk.StringVar, row: int, column: int) -> tk.Entry:
         entry = tk.Entry(
             parent,
@@ -911,6 +963,24 @@ class RobotArmDebugGui(tk.Tk):
         self._obstacle_threshold_mm = threshold_mm
         self._obstacle_clear_mm = clear_mm
         self._obstacle_device_name = device_name
+        if self.preview_canvas is not None:
+            self._update_preview()
+
+    def _set_imu_monitor_state(
+        self,
+        state: str,
+        pitch_deg: int,
+        roll_deg: int,
+        gyro_mag_mdps: int,
+        temp_dc: int,
+        device_name: str,
+    ) -> None:
+        self._imu_monitor_state = state
+        self._imu_pitch_deg = pitch_deg
+        self._imu_roll_deg = roll_deg
+        self._imu_gyro_mag_mdps = gyro_mag_mdps
+        self._imu_temp_dc = temp_dc
+        self._imu_device_name = device_name
         if self.preview_canvas is not None:
             self._update_preview()
 
@@ -1421,14 +1491,24 @@ class RobotArmDebugGui(tk.Tk):
         content_bottom = content_top + PREVIEW_CANVAS_HEIGHT
 
         canvas.create_rectangle(0, 0, width, height, fill="#07101b", outline="")
-        canvas.create_oval(content_left - 80, content_top - 70, content_left + 250, content_top + 210, fill="#122b49", outline="")
-        canvas.create_oval(content_left + 250, content_top + 30, content_left + 620, content_top + 320, fill="#1a203d", outline="")
+        canvas.create_oval(content_left - 80, content_top - 70, content_left + 320, content_top + 240, fill="#122b49", outline="")
+        canvas.create_oval(content_left + 380, content_top + 40, content_left + 820, content_top + 360, fill="#1a203d", outline="")
+        canvas.create_oval(content_left - 60, content_top + 320, content_left + 360, content_top + 620, fill="#0e1f37", outline="")
         canvas.create_rectangle(0, content_bottom - 52, width, content_bottom, fill="#081723", outline="")
 
-        side_left = content_left + 14
-        side_top = content_top + 26
-        side_right = content_left + 370
-        side_bottom = content_top + PREVIEW_CANVAS_HEIGHT - 30
+        top_row_top = content_top + 16
+        top_row_bottom = content_top + 250
+        bottom_row_top = content_top + 270
+        bottom_row_bottom = content_top + PREVIEW_CANVAS_HEIGHT - 14
+        left_col_left = content_left + 14
+        left_col_right = content_left + 372
+        right_col_left = content_left + 388
+        right_col_right = content_left + PREVIEW_CANVAS_WIDTH - 14
+
+        side_left = left_col_left
+        side_top = bottom_row_top
+        side_right = left_col_right
+        side_bottom = bottom_row_bottom
         canvas.create_rectangle(side_left, side_top, side_right, side_bottom, fill="#0c1b2a", outline="#1f4165", width=2)
 
         min_x_mm = self.preview_bounds["min_x"]
@@ -1627,16 +1707,17 @@ class RobotArmDebugGui(tk.Tk):
             canvas.create_line(target_x - 16, target_y, target_x + 16, target_y, fill="#ff6f91", width=2)
             canvas.create_line(target_x, target_y - 16, target_x, target_y + 16, fill="#ff6f91", width=2)
 
-        tof_panel_left = 20.0
-        tof_panel_right = side_left - 18.0
-        tof_panel_top = content_top + 36.0
-        tof_panel_bottom = content_bottom - 40.0
+        tof_panel_left = left_col_left
+        tof_panel_right = left_col_right
+        tof_panel_top = top_row_top
+        tof_panel_bottom = top_row_bottom
         if (tof_panel_right - tof_panel_left) >= 170.0:
             tof_panel_width = tof_panel_right - tof_panel_left
             tof_panel_height = tof_panel_bottom - tof_panel_top
             tof_center_x = tof_panel_left + (tof_panel_width * 0.5)
             tof_center_y = tof_panel_top + min(126.0, tof_panel_height * 0.42)
             gauge_radius = min(74.0, tof_panel_width * 0.34)
+            poll_interval_ms = self._get_status_poll_interval_ms()
             gauge_left = tof_center_x - gauge_radius
             gauge_top = tof_center_y - gauge_radius
             gauge_right = tof_center_x + gauge_radius
@@ -1771,6 +1852,14 @@ class RobotArmDebugGui(tk.Tk):
                 font=("Segoe UI", 8, "bold"),
             )
             canvas.create_text(
+                sensor_bar_left,
+                sensor_bar_bottom + 12,
+                anchor="nw",
+                text=f"update {poll_interval_ms} ms",
+                fill="#7ca2c4",
+                font=("Segoe UI", 7),
+            )
+            canvas.create_text(
                 sensor_bar_right,
                 sensor_bar_bottom + 12,
                 anchor="ne",
@@ -1800,10 +1889,210 @@ class RobotArmDebugGui(tk.Tk):
                 font=("Consolas", 12, "bold"),
             )
 
-        workspace_left = side_right + 22
-        workspace_top = content_top + 32
-        workspace_right = width - 20
-        workspace_bottom = content_top + PREVIEW_CANVAS_HEIGHT - 34
+        imu_panel_left = right_col_left
+        imu_panel_right = right_col_right
+        imu_panel_top = top_row_top
+        imu_panel_bottom = top_row_bottom
+
+        if (imu_panel_right - imu_panel_left) >= 170.0:
+            imu_panel_width = imu_panel_right - imu_panel_left
+            imu_panel_height = imu_panel_bottom - imu_panel_top
+            imu_center_x = imu_panel_left + (imu_panel_width * 0.5)
+            disk_center_y = imu_panel_top + 88
+            disk_radius = max(28.0, min(46.0, imu_panel_height * 0.21))
+
+            if self._imu_monitor_state == "level":
+                imu_primary = "#52f7ff"
+                imu_status_title = "LEVEL"
+                imu_card_outline = "#226a7c"
+                imu_card_fill = "#0f1726"
+            elif self._imu_monitor_state == "tilted":
+                imu_primary = "#ffb347"
+                imu_status_title = "TILTED"
+                imu_card_outline = "#7a5a24"
+                imu_card_fill = "#0f1726"
+            elif self._imu_monitor_state == "shaking":
+                imu_primary = "#ff6b6b"
+                imu_status_title = "SHAKING"
+                imu_card_outline = "#913838"
+                imu_card_fill = "#0f1726"
+            elif self._imu_monitor_state == "disabled":
+                imu_primary = "#7e8ca3"
+                imu_status_title = "IMU OFFLINE"
+                imu_card_outline = "#3b4858"
+                imu_card_fill = "#111722"
+            else:
+                imu_primary = "#ffb347"
+                imu_status_title = "IMU STANDBY"
+                imu_card_outline = "#7a5a24"
+                imu_card_fill = "#0f1726"
+
+            canvas.create_rectangle(imu_panel_left, imu_panel_top, imu_panel_right, imu_panel_bottom, fill=imu_card_fill, outline=imu_card_outline, width=2)
+            canvas.create_oval(imu_panel_right - 88, imu_panel_top + 14, imu_panel_right + 8, imu_panel_top + 110, fill="#13283f", outline="")
+            canvas.create_oval(imu_panel_left - 24, imu_panel_top + 134, imu_panel_left + 80, imu_panel_top + 230, fill="#10233a", outline="")
+
+            canvas.create_text(
+                imu_panel_left + 18,
+                imu_panel_top + 18,
+                anchor="w",
+                text="IMU Attitude",
+                fill="#f3fbff",
+                font=("Segoe UI", 12, "bold"),
+            )
+            canvas.create_text(
+                imu_panel_left + 18,
+                imu_panel_top + 40,
+                anchor="w",
+                text="gripper pitch + roll",
+                fill="#8bcfff",
+                font=("Segoe UI", 8, "bold"),
+            )
+
+            if self._imu_monitor_state == "disabled":
+                canvas.create_oval(imu_center_x - disk_radius, disk_center_y - disk_radius, imu_center_x + disk_radius, disk_center_y + disk_radius, fill="#1a2231", outline=imu_card_outline, width=2)
+                canvas.create_text(imu_center_x, disk_center_y, text="OFFLINE", fill="#7e8ca3", font=("Segoe UI", 9, "bold"))
+            else:
+                pitch_deg_visual = max(-90, min(90, int(self._imu_pitch_deg)))
+                roll_deg_visual = int(self._imu_roll_deg)
+                pitch_offset = max(-disk_radius, min(disk_radius, (pitch_deg_visual / 45.0) * disk_radius * 0.6))
+                roll_rad_view = math.radians(roll_deg_visual)
+                cos_r = math.cos(-roll_rad_view)
+                sin_r = math.sin(-roll_rad_view)
+
+                canvas.create_oval(imu_center_x - disk_radius, disk_center_y - disk_radius, imu_center_x + disk_radius, disk_center_y + disk_radius, fill="#3da4e0", outline="")
+
+                if pitch_offset >= disk_radius - 0.5:
+                    canvas.create_oval(imu_center_x - disk_radius, disk_center_y - disk_radius, imu_center_x + disk_radius, disk_center_y + disk_radius, fill="#c47a3e", outline="")
+                elif pitch_offset > -disk_radius + 0.5:
+                    n_arc = 32
+                    t_lo = math.asin(pitch_offset / disk_radius)
+                    t_hi = math.pi - t_lo
+                    polygon_points: list[float] = []
+                    for i in range(n_arc + 1):
+                        t = t_lo + (t_hi - t_lo) * (i / n_arc)
+                        lx = disk_radius * math.cos(t)
+                        ly = disk_radius * math.sin(t)
+                        sx = lx * cos_r - ly * sin_r
+                        sy = lx * sin_r + ly * cos_r
+                        polygon_points.append(imu_center_x + sx)
+                        polygon_points.append(disk_center_y + sy)
+                    canvas.create_polygon(*polygon_points, fill="#c47a3e", outline="")
+
+                if -disk_radius < pitch_offset < disk_radius:
+                    dx_h = math.sqrt(disk_radius * disk_radius - pitch_offset * pitch_offset)
+                    x1 = -dx_h * cos_r - pitch_offset * sin_r
+                    y1 = -dx_h * sin_r + pitch_offset * cos_r
+                    x2 = dx_h * cos_r - pitch_offset * sin_r
+                    y2 = dx_h * sin_r + pitch_offset * cos_r
+                    canvas.create_line(imu_center_x + x1, disk_center_y + y1, imu_center_x + x2, disk_center_y + y2, fill="#ffffff", width=2)
+
+                for p_deg, dx_half in ((-30, disk_radius * 0.32), (-15, disk_radius * 0.22), (15, disk_radius * 0.22), (30, disk_radius * 0.32)):
+                    ladder_offset = pitch_offset - (p_deg / 45.0) * disk_radius * 0.6
+                    if abs(ladder_offset) >= disk_radius - 4:
+                        continue
+                    for sign in (-1, 1):
+                        lx_a = sign * dx_half - 4
+                        lx_b = sign * dx_half + 4
+                        sx_a = lx_a * cos_r - ladder_offset * sin_r
+                        sy_a = lx_a * sin_r + ladder_offset * cos_r
+                        sx_b = lx_b * cos_r - ladder_offset * sin_r
+                        sy_b = lx_b * sin_r + ladder_offset * cos_r
+                        canvas.create_line(imu_center_x + sx_a, disk_center_y + sy_a, imu_center_x + sx_b, disk_center_y + sy_b, fill="#e0eef5", width=1)
+
+                canvas.create_line(imu_center_x - disk_radius * 0.55, disk_center_y, imu_center_x - disk_radius * 0.18, disk_center_y, fill="#ffe082", width=3)
+                canvas.create_line(imu_center_x + disk_radius * 0.18, disk_center_y, imu_center_x + disk_radius * 0.55, disk_center_y, fill="#ffe082", width=3)
+                canvas.create_oval(imu_center_x - 3, disk_center_y - 3, imu_center_x + 3, disk_center_y + 3, fill="#ffe082", outline="")
+
+                canvas.create_polygon(
+                    imu_center_x, disk_center_y - disk_radius - 1,
+                    imu_center_x - 5, disk_center_y - disk_radius - 9,
+                    imu_center_x + 5, disk_center_y - disk_radius - 9,
+                    fill="#ffe082", outline="",
+                )
+                roll_marker_angle = math.radians(-90 - roll_deg_visual)
+                marker_x = imu_center_x + (disk_radius - 8) * math.cos(roll_marker_angle)
+                marker_y = disk_center_y + (disk_radius - 8) * math.sin(roll_marker_angle)
+                canvas.create_oval(marker_x - 4, marker_y - 4, marker_x + 4, marker_y + 4, fill=imu_primary, outline="#ffffff")
+                canvas.create_oval(imu_center_x - disk_radius, disk_center_y - disk_radius, imu_center_x + disk_radius, disk_center_y + disk_radius, outline=imu_card_outline, width=2)
+
+            if self._imu_monitor_state == "disabled":
+                pose_text = "pitch  --°    roll  --°"
+            else:
+                pose_text = f"pitch {self._imu_pitch_deg:+d}°    roll {self._imu_roll_deg:+d}°"
+
+            canvas.create_text(
+                imu_center_x,
+                imu_panel_top + 150,
+                text=pose_text,
+                fill="#dcecff",
+                font=("Segoe UI", 13, "bold"),
+            )
+
+            gyro_bar_left = imu_panel_left + 24
+            gyro_bar_right = imu_panel_right - 24
+            gyro_bar_top = imu_panel_top + 172
+            gyro_bar_bottom = gyro_bar_top + 8
+            shaking_threshold_mdps = 8000
+            display_cap_mdps = max(shaking_threshold_mdps * 2, self._imu_gyro_mag_mdps + 1500)
+            gyro_ratio = max(0.0, min(1.0, self._imu_gyro_mag_mdps / display_cap_mdps)) if display_cap_mdps > 0 else 0.0
+            gyro_fill_right = gyro_bar_left + ((gyro_bar_right - gyro_bar_left) * gyro_ratio)
+            canvas.create_rectangle(gyro_bar_left, gyro_bar_top, gyro_bar_right, gyro_bar_bottom, fill="#102033", outline="#264764")
+            if self._imu_monitor_state != "disabled":
+                canvas.create_rectangle(gyro_bar_left, gyro_bar_top, gyro_fill_right, gyro_bar_bottom, fill=imu_primary, outline="")
+            shaking_marker_x = gyro_bar_left + ((gyro_bar_right - gyro_bar_left) * min(1.0, shaking_threshold_mdps / display_cap_mdps))
+            canvas.create_line(shaking_marker_x, gyro_bar_top - 4, shaking_marker_x, gyro_bar_bottom + 4, fill="#ffe082", width=2)
+
+            if self._imu_monitor_state == "disabled":
+                gyro_label = "ω -- mdps"
+                temp_label = "T --.- °C"
+            else:
+                gyro_label = f"ω {self._imu_gyro_mag_mdps} mdps"
+                temp_value = self._imu_temp_dc / 10.0
+                temp_label = f"T {temp_value:+.1f} °C" if temp_value < 0 else f"T {temp_value:.1f} °C"
+
+            canvas.create_text(
+                gyro_bar_left,
+                gyro_bar_bottom + 4,
+                anchor="nw",
+                text=f"Shake>{shaking_threshold_mdps} mdps",
+                fill="#ffe082",
+                font=("Segoe UI", 7, "bold"),
+            )
+            canvas.create_text(
+                gyro_bar_right,
+                gyro_bar_bottom + 4,
+                anchor="ne",
+                text=gyro_label,
+                fill="#7ca2c4",
+                font=("Segoe UI", 7),
+            )
+
+            imu_cta_left = imu_panel_left + 18
+            imu_cta_right = imu_panel_right - 18
+            imu_cta_top = imu_panel_bottom - 48
+            imu_cta_bottom = imu_panel_bottom - 18
+            canvas.create_rectangle(imu_cta_left, imu_cta_top, imu_cta_right, imu_cta_bottom, fill="#11314c", outline=imu_primary, width=2)
+            canvas.create_text(
+                imu_cta_left + 12,
+                (imu_cta_top + imu_cta_bottom) * 0.5,
+                anchor="w",
+                text=imu_status_title,
+                fill=imu_primary,
+                font=("Segoe UI", 10, "bold"),
+            )
+            canvas.create_text(
+                imu_cta_right - 12,
+                (imu_cta_top + imu_cta_bottom) * 0.5,
+                anchor="e",
+                text=f"{self._imu_device_name}    {temp_label}",
+                fill="#ecfcff",
+                font=("Segoe UI", 8, "bold"),
+            )
+
+        workspace_left = right_col_left
+        workspace_top = bottom_row_top
+        workspace_right = right_col_right
+        workspace_bottom = bottom_row_bottom
         workspace_width = workspace_right - workspace_left
         workspace_height = workspace_bottom - workspace_top
         workspace_text_width = workspace_width - 28
@@ -1997,9 +2286,10 @@ class RobotArmDebugGui(tk.Tk):
         self.firmware_target_var.set("Firmware target pending")
         self._set_firmware_obstacle_feedback("Obstacle monitor waiting for STATUS...", "warning")
         self._set_obstacle_monitor_state("unknown", 0, 120, 140, "pending")
+        self._set_imu_monitor_state("unknown", 0, 0, 0, 0, "pending")
         self._set_fw_command_feedback("FW command result: connected, waiting for next command", "FW echo: no command acknowledgement yet", tone="neutral")
         self.append_log(f"[host] connected to {port}")
-        self._schedule_status_poll(initial_delay_ms=150)
+        self._schedule_status_poll(initial_delay_ms=self._get_status_poll_interval_ms())
 
     def disconnect_serial(self) -> None:
         if self.serial_port is None:
@@ -2024,6 +2314,7 @@ class RobotArmDebugGui(tk.Tk):
         self.firmware_target_var.set("Firmware target unavailable")
         self._set_firmware_obstacle_feedback("Obstacle monitor unavailable | disconnected", "neutral")
         self._set_obstacle_monitor_state("disabled", 0, 120, 140, "disconnected")
+        self._set_imu_monitor_state("disabled", 0, 0, 0, 0, "disconnected")
         self._set_fw_command_feedback("FW command result: disconnected", "FW echo: serial link closed", tone="error")
         self.append_log("[host] disconnected")
 
@@ -2048,7 +2339,7 @@ class RobotArmDebugGui(tk.Tk):
             else:
                 self.append_log(line)
 
-        self.after(100, self._poll_log_queue)
+        self.after(LOG_QUEUE_POLL_INTERVAL_MS, self._poll_log_queue)
 
     def _append_log_text(self, line: str) -> None:
         self.log_text.configure(state="normal")
@@ -2121,12 +2412,13 @@ class RobotArmDebugGui(tk.Tk):
             self.after_cancel(self.status_poll_after_id)
             self.status_poll_after_id = None
 
-    def _schedule_status_poll(self, initial_delay_ms: int = 500) -> None:
+    def _schedule_status_poll(self, initial_delay_ms: int | None = None) -> None:
         self._cancel_status_poll()
         if self.serial_port is None:
             return
 
-        self.status_poll_after_id = self.after(initial_delay_ms, self._request_status_poll)
+        delay_ms = self._get_status_poll_interval_ms() if initial_delay_ms is None else max(TOF_STATUS_POLL_INTERVAL_MIN_MS, int(initial_delay_ms))
+        self.status_poll_after_id = self.after(delay_ms, self._request_status_poll)
 
     def _request_status_poll(self) -> None:
         self.status_poll_after_id = None
@@ -2134,7 +2426,7 @@ class RobotArmDebugGui(tk.Tk):
             return
 
         if self._write_serial_command("STATUS", log_command=False):
-            self._schedule_status_poll(initial_delay_ms=500)
+            self._schedule_status_poll()
 
     def _handle_firmware_line(self, line: str) -> None:
         obstacle_event_match = SAFETY_OBSTACLE_PATTERN.match(line)
@@ -2220,6 +2512,20 @@ class RobotArmDebugGui(tk.Tk):
             x_mm, y_mm, z_mm, elbow_mode = cartesian_match.groups()
             self.firmware_target_var.set(
                 f"Firmware Cartesian target x={x_mm} y={y_mm} z={z_mm} mm | elbow={elbow_mode}"
+            )
+            return
+
+        imu_status_match = STATUS_IMU_PATTERN.match(line)
+        if imu_status_match is not None:
+            state, pitch_deg, roll_deg, gyro_mag_mdps, temp_dc = imu_status_match.groups()
+            device_name = "mpu6050" if state != "disabled" else "sensor-not-ready"
+            self._set_imu_monitor_state(
+                state,
+                int(pitch_deg),
+                int(roll_deg),
+                int(gyro_mag_mdps),
+                int(temp_dc),
+                device_name,
             )
             return
 

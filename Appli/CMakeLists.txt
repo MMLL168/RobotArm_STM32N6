@@ -39,13 +39,7 @@ add_executable(${CMAKE_PROJECT_NAME})
 # Include mx-generated
 include("mx-generated.cmake")
 
-target_compile_definitions(stm32cubemx INTERFACE
-    HAL_I2C_MODULE_ENABLED
-)
-
 target_sources(STM32_Drivers PRIVATE
-    ${CMAKE_CURRENT_SOURCE_DIR}/../Drivers/STM32N6xx_HAL_Driver/Src/stm32n6xx_hal_i2c.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/../Drivers/STM32N6xx_HAL_Driver/Src/stm32n6xx_hal_i2c_ex.c
     ${CMAKE_CURRENT_SOURCE_DIR}/../Drivers/STM32N6xx_HAL_Driver/Src/stm32n6xx_hal_uart.c
     ${CMAKE_CURRENT_SOURCE_DIR}/../Drivers/STM32N6xx_HAL_Driver/Src/stm32n6xx_hal_uart_ex.c
 )
@@ -71,6 +65,7 @@ target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE
 target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/app_main.c
     ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/app_irq_bridge.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/ili9341.c
     ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/robot_arm_kinematics.c
 )
 
@@ -84,6 +79,12 @@ target_link_libraries(${CMAKE_PROJECT_NAME} PRIVATE
     # Add user defined libraries
 )
 
+if(CMAKE_OBJCOPY)
+    add_custom_command(TARGET ${CMAKE_PROJECT_NAME} POST_BUILD
+        COMMAND ${CMAKE_OBJCOPY} -Obinary $<TARGET_FILE:${CMAKE_PROJECT_NAME}> ${CMAKE_CURRENT_BINARY_DIR}/${CMAKE_PROJECT_NAME}.bin
+    )
+endif()
+
 # Remove wrong libob.a library dependency when using cpp files
 list(REMOVE_ITEM CMAKE_C_IMPLICIT_LINK_LIBRARIES ob)
 
@@ -91,9 +92,6 @@ list(REMOVE_ITEM CMAKE_C_IMPLICIT_LINK_LIBRARIES ob)
 if((CMAKE_C_STANDARD EQUAL 90) OR (CMAKE_C_STANDARD EQUAL 99))
     message(ERROR "Generated code requires C11 or higher")
 endif()
-
-
-
 
 
 
