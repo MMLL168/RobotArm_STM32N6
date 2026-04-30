@@ -308,7 +308,7 @@ static const uint8_t *ILI9341_FindGlyph(char character)
 static void ILI9341_DrawChar(uint16_t x, uint16_t y, char character, uint16_t foreground, uint16_t background, uint8_t scale)
 {
   const uint8_t *glyph = ILI9341_FindGlyph(character);
-  uint8_t char_buffer[1536]; /* max scale 4: 24x32 pixels * 2 = 1536 bytes */
+  static uint8_t char_buffer[1536]; /* max scale 4: 24x32 pixels * 2 = 1536 bytes */
   uint16_t char_width;
   uint16_t char_height;
   uint8_t fg_high;
