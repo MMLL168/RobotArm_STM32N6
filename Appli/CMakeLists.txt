@@ -66,6 +66,7 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/app_main.c
     ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/app_irq_bridge.c
     ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/ili9341.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/ili9486.c
     ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/robot_arm_kinematics.c
 )
 

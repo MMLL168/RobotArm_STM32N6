@@ -108,6 +108,10 @@
 | 102 | L620 | 2026-04-26 16:05:01 | 將 LPUART1 IRQ bridge 抽成自有檔案避免 regenerate 覆蓋 |
 | 103 | L625 | 2026-04-26 16:20:38 | 補上 XSPI3 spurious IRQ handler 避免 App 初始化被打斷 |
 | 104 | L630 | 2026-04-26 16:36:07 | 補齊 XSPI1 與 XSPI2 defensive handler 避免再次落回 Default_Handler |
+| 105 | L639 | 2026-04-29 10:00:00 | 對齊 NUCLEO-N657X0-Q 實機板級的 proposal.md 完善 |
+| 106 | L644 | 2026-04-29 13:00:00 | 修正 GUI TOF Safety panel 永遠卡在待機與 0 mm |
+| 107 | L649 | 2026-04-29 15:00:00 | 過濾 VL53L0X TCC 噪音避免 GUI 在 20 mm 與正常值間跳動 |
+| 108 | L655 | 2026-04-30 11:00:00 | 新增 GUI IMU Attitude 姿態儀面板與 firmware 100 ms imu status |
 
 ## 記錄
 
@@ -631,3 +635,30 @@
 - 日期時間：2026-04-26 16:36:07
 - 問題原因：在前一版只補上 `XSPI3_IRQHandler()` 之後，使用者仍回報「依樣跑不到」，而且目前除錯畫面仍停在 startup 的 `Default_Handler`。重新檢查最終 ELF 符號後發現，只有 `XSPI3_IRQHandler` 被真正 override，`XSPI1_IRQHandler` 與 `XSPI2_IRQHandler` 仍然是 weak alias 指回 `Default_Handler`；同時先前 GDB reload 前的實際停點也曾落在 `XSPI2_IRQHandler`，表示 LCD/CubeMX 更新後不只 XSPI3，其他非 Appli 自有的 XSPI 線也可能帶著 inherited/spurious IRQ 進來。
 - 處理方式：把 `Appli/Core/Src/app_irq_bridge.c` 擴充成統一的 XSPI defensive bridge，新增 `XSPI1_IRQHandler()` 與 `XSPI2_IRQHandler()`，並讓 XSPI1/2/3 都共用同一個 helper，在中斷進入時立即 disable 與 clear pending bit，避免再回落到 startup weak handler；另外把 `Appli/Core/Src/app_main.c` 的 `App_ClearInheritedInterruptState()` 一併擴充為進入 App 時先清 `XSPI1_IRQn`、`XSPI2_IRQn`、`XSPI3_IRQn`。完成後需重新 build 並確認最終 ELF 內 `XSPI1_IRQHandler`、`XSPI2_IRQHandler`、`XSPI3_IRQHandler` 都已經是強符號，不再指向 `Default_Handler`。
+- 備註：後續以 `arm-none-eabi-nm -n STM32N6_Appli.elf` 比對位址驗證，`Default_Handler` 在 `0x3400fbe4`，而 `LPUART1_IRQHandler` (`0x3401437e`)、`XSPI1_IRQHandler` (`0x3401438a`)、`XSPI2_IRQHandler` (`0x34014398`)、`XSPI3_IRQHandler` (`0x340143a6`) 全部落在 `app_irq_bridge.o` 程式區、不再指向 weak alias，IRQ 防禦層落地完成。
+
+### 105. 對齊 NUCLEO-N657X0-Q 實機板級的 proposal.md 完善
+- 日期時間：2026-04-29 10:00:00
+- 問題原因：原 `proposal.md` 為早期紙上規劃，跟現行 `STM32N6.ioc` 與 NUCLEO-N657X0-Q 的板級實況對不上：UART 寫成 PA9/PA10 (USART1)，但板上 ST-Link VCP 實際走 LPUART1 PE5/PE6，且 PA9–PA15 是 USB-UCPD/SWD 區不可佔用；4 路 Servo 沒寫對應 timer，與目前 .ioc 的 TIM1_CH1/CH2、TIM2_CH3、TIM16_CH1 對不齊；Audio 區整段標「待定」沒給候選腳，未提及 .ioc 已固定的 PC9 = AUDIOCLK；Camera 區把 OV7670 並行寫成主路徑，沒分清楚 NUCLEO-N657X0-Q 的 FPC 接頭其實是 MIPI CSI-2 (CSI_CKP/N、D0P/N、D1P/N) 而 PO5 = CAM_NRST 已板級固定；user LED/Button 寫「板載預設」沒對應 LD1=PG0 / LD2=PG10 / LD3=PG8 / USER=PC13；板級已保留腳位（debug、TRACE、OCTOSPI flash PN0–PN12、UCPD、FSBL I2C2、AUDIOCLK、CAM_NRST）也沒列出，後續 CubeMX 衝突排查會反覆踩雷。
+- 處理方式：在 `proposal.md` 重寫整份規劃：補上「板級不可用 / 已保留腳位」總表；新增「影像策略」章節分路線 A（板載 MIPI CSI-2）與路線 B（OV7670 並行），並標出 PE6 VSYNC 與 LPUART1_RX、PC9 AUDIOCLK 與 OV7670 XCLK 的兩個關鍵衝突；以 SAI1 + PC9 AUDIOCLK 為基準，提出 INMP441/MAX98357A 共用 BCLK/LRCK 的 Audio 候選腳並標出哪些候選會與既有模組衝突；Servo 補上 timer/channel 對應、period=19999 與 prescaler=399 的來源與「為何拆 3 顆 timer」的 AF 限制說明；UART 改為 LPUART1 PE5/PE6 對齊 ST-Link VCP；LED/Button 補上實機腳位；每個 Phase 加上可量測的驗收條件，Phase 2 LCD 標為已完成 bring-up，新增 Phase 6「整合 / FreeRTOS」章節與「已知會踩到的雷」整理。
+
+### 106. 修正 GUI TOF Safety panel 永遠卡在待機與 0 mm
+- 日期時間：2026-04-29 13:00:00
+- 問題原因：使用者回報 GUI 連上 COM 後 TOF Safety 卡片一直顯示「TOF STANDBY / 0 mm / Waiting for valid range / device pending」，沒有任何即時對應數值。比對後是兩個串連 bug：（1）`Appli/Core/Src/app_main.c` 的 `App_LogRobotArmStatus()` 只送合併版 `[status] xyz=...,obstacle=clear/0mm`，但 `tools/robot_arm_debug_gui.py` 的 `STATUS_OBSTACLE_PATTERN` regex 期待獨立 line `[status] obstacle=<state> range=<n> mm threshold=<n> mm clear=<n> mm device=<name>`，所以 GUI 永遠不會中、`_obstacle_monitor_state` 一直停在初始 `unknown / pending`；（2）`App_UpdateObstacleMonitor()` 在 `!App_HasActiveMotion() && !app_obstacle_detected` 時 early-return，閒置時連量都不量，因此即便 regex 對得起來、距離也只在動作中才會更新。
+- 處理方式：在 `Appli/Core/Src/app_main.c` 新增 `App_PublishObstacleStatus()` helper，每 100 ms（`APP_OBSTACLE_MONITOR_INTERVAL_MS`）發一條 GUI 規格的 `[status] obstacle=<state> range=<n> mm threshold=120 mm clear=140 mm device=<name>` line；state 詞彙對齊 GUI 的 `disabled` / `detected` / `clear` / `unknown` 四色帶；`App_UpdateObstacleMonitor()` 把 idle 早回拿掉，改成 idle 也照樣量距 + publish，僅當 `App_HasActiveMotion()` 為真時才走 motion stop 邏輯；`phase1_vl53l0x_ready=false` 時 publish `disabled / sensor-not-ready`，讓 GUI 切到灰色「TOF OFFLINE」、量測讀失敗 publish `disabled / read-failed`；量測成功時用 `Phase1_Vl53l0xDeviceCodeString()` 帶實際 device code (`range-complete` 等) 出去。最後以 `cmake --build --preset Debug` 重建 Appli，僅保留既有的 `target_pulses` 未使用警告與 RWX segment 警告。
+
+### 107. 過濾 VL53L0X TCC 噪音避免 GUI 在 20 mm 與正常值間跳動
+- 日期時間：2026-04-29 15:00:00
+- 問題原因：上一版讓 GUI 看得到即時 TOF 值之後，使用者回報數字會在 `20 mm`（`device=tcc`）與 `~420 mm`（`device=range-complete`）之間反覆跳動，視覺上極不穩定。比對 firmware UART 日誌確認感測器約每 4–5 次量測會丟出一次 `device_code=8`（Target Consistency Check 失敗）；VL53L0X spec 在這種情況會把距離 clip 成最低 20 mm 並用 status 旗標告知該次量測不可信，這個 20 mm 是 sensor 自己標的 dropout、不是真實近距離。原本 `App_UpdateObstacleMonitor()` 不分青紅皂白把 TCC 讀值當有效量測往 GUI 送，並寫進 `app_obstacle_last_measurement`，於是顯示閃爍、後續判斷也會被噪音污染。
+- 處理方式：在 `Appli/Core/Src/app_main.c` 的 `App_UpdateObstacleMonitor()` 拿到量測之後加 `range_status_code != VL53L0X_DEVICEERROR_RANGECOMPLETE` 過濾分支：噪音讀值不更新 `app_obstacle_last_measurement`、不重新計算 detection、改以「上一筆有效量測的 range + 當前 detected/clear 旗標」重發 `[status]` 給 GUI（沒有任何有效量測史時才 fallback 為 `unknown / 0 / <error-code>`）；只有 `RANGECOMPLETE` 的量測才會走原本的 obstacle/clear 判定與 `[safety]` 轉換 log；同時把 `obstacle_now` / `clear_now` 條件簡化為純距離比較，因為 RANGECOMPLETE 已在過濾分支前確認。最後以 `cmake --build --preset Debug` 重建 Appli 通過。
+
+### 108. 新增 GUI IMU Attitude 姿態儀面板與 firmware 100 ms imu status
+- 日期時間：2026-04-30 11:00:00
+- 問題原因：MPU6050 已經能讀，但 GUI 只有每秒一次的 `[mpu6050] acc=… gyro=…` raw log，沒有任何即時可視化；夾爪上的姿態變化（pitch/roll）、有沒有在抖動、目前溫度都得自己讀數字解釋，跟 TOF Safety 卡片那種「一眼就能看狀態」差太多。使用者要求比照 TOF 卡片做一張 IMU 姿態儀，並把版面改成「TOF + IMU 一排、手臂 side view + 3D workspace 一排」的兩列佈局。
+- 處理方式：firmware 端在 `Appli/Core/Src/app_main.c` 新增 `App_PublishImuStatus()` helper 與 `App_UpdateImuMonitor()`（與既有 `App_UpdateObstacleMonitor()` 對稱），每 100 ms 從 `Phase1_Mpu6050ReadRawSample()` 取一筆，用 `atan2f` 算 pitch / roll、`sqrtf(gx²+gy²+gz²)` 算 gyro magnitude，再依 `shaking > tilted > level` 優先序分類成 `disabled / shaking / tilted / level / unknown`，輸出 `[status] imu=<state> pitch=<deg> roll=<deg> gyro_mag=<mdps> temp_dc=<dC>`；threshold 用 `APP_IMU_LEVEL_DEG=5`、`APP_IMU_TILT_DEG=30`、`APP_IMU_SHAKING_MDPS=8000`，呼叫掛在 `App_RunLoopIteration()` 內。GUI 端在 `tools/robot_arm_debug_gui.py` 把 `PREVIEW_CANVAS_WIDTH/HEIGHT` 從 `560×360` 拉到 `760×640`、視窗預設 `1280×820 → 1320×1080`，新增 `STATUS_IMU_PATTERN` regex 與 `_set_imu_monitor_state()` setter，把 `_handle_firmware_line()` 的 IMU 分支放在 obstacle 之前；`_draw_preview()` 改成兩排版面：上排 TOF Safety（左半）+ IMU Attitude（右半），下排 Side view（左半）+ 3D Workspace（右半），所有座標改用 `top_row_top/bottom`、`bottom_row_top/bottom`、`left_col_left/right`、`right_col_left/right` 區塊變數，原本散在 1471/1673/1855 三處的硬寫位置全部對齊到這層抽象。IMU 卡片內含圓形 artificial horizon（sky/ground 雙色填充隨 roll 旋轉、隨 pitch 上下偏移、含 ±15°/±30° pitch ladder 與 12 點鐘參考三角、會繞圓周走的 roll marker、固定中央黃色夾爪 wing 十字）、碟下大字 `pitch ±NN°  roll ±NN°`、底部 gyro magnitude bar 配 `Shake>8000 mdps` threshold 標線、CTA-style 狀態條顯示 state title 與 `device mpu6050  T 26.5 °C`；4 種 state 配色 `level=#52f7ff / tilted=#ffb347 / shaking=#ff6b6b / disabled=#7e8ca3`，`disabled` 時直接畫灰色「OFFLINE」placeholder 取代碟盤。連線時送 `unknown / pending`、斷線時送 `disabled / disconnected`。最後以 `cmake --build --preset Debug` 重建 Appli 通過（ROM 用量 +1.6 KB），GUI 以 `python -m py_compile` 檢查無錯誤、實機啟動後 4 種 IMU state 都能正確 render（已驗證螢幕截圖：pitch +33° roll -27° → TILTED 橘色卡片，horizon 碟盤明顯往左下歪），`STATUS_IMU_PATTERN` 對 4 組 firmware sample line 全部成功匹配。
+
+## LCD Driver Abstraction & UI Scaling (Phase 2 Continued)
+- Separated ILI9341 and large panel (labeled as ILI9486) drivers.
+- Refactored pp_main.c to use APP_LCD_TYPE macro for switching drivers.
+- Identified large panel physically as a 3.2-inch 240x320 display, fixed horizontal clipping by reverting to 240x320 resolution.
+- Increased UI font scale from 1U to 2U for readability, resolving spacing and bounding box character limit issues (reduced line max to 20 chars).

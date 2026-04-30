@@ -1,7 +1,47 @@
 #include "app_main.h"
 
 #include "i2c.h"
+#define APP_LCD_TYPE 9486
+
+#if APP_LCD_TYPE == 9486
+#include "ili9486.h"
+#define LCD_WIDTH           ILI9486_WIDTH
+#define LCD_HEIGHT          ILI9486_HEIGHT
+#define LCD_COLOR_BLACK     ILI9486_COLOR_BLACK
+#define LCD_COLOR_WHITE     ILI9486_COLOR_WHITE
+#define LCD_COLOR_BLUE      ILI9486_COLOR_BLUE
+#define LCD_COLOR_GRAY      ILI9486_COLOR_GRAY
+#define LCD_COLOR_CYAN      ILI9486_COLOR_CYAN
+#define LCD_COLOR_YELLOW    ILI9486_COLOR_YELLOW
+#define LCD_COLOR_GREEN     ILI9486_COLOR_GREEN
+#define LCD_COLOR_RED       ILI9486_COLOR_RED
+#define LCD_COLOR_DARK      ILI9486_COLOR_DARK
+#define LCD_COLOR_ORANGE    ILI9486_COLOR_ORANGE
+#define LCD_Init            ILI9486_Init
+#define LCD_FillScreen      ILI9486_FillScreen
+#define LCD_FillRect        ILI9486_FillRect
+#define LCD_DrawString      ILI9486_DrawString
+#define LCD_DrawRgb565Image ILI9486_DrawRgb565Image
+#elif APP_LCD_TYPE == 9341
 #include "ili9341.h"
+#define LCD_WIDTH           ILI9341_WIDTH
+#define LCD_HEIGHT          ILI9341_HEIGHT
+#define LCD_COLOR_BLACK     ILI9341_COLOR_BLACK
+#define LCD_COLOR_WHITE     ILI9341_COLOR_WHITE
+#define LCD_COLOR_BLUE      ILI9341_COLOR_BLUE
+#define LCD_COLOR_GRAY      ILI9341_COLOR_GRAY
+#define LCD_COLOR_CYAN      ILI9341_COLOR_CYAN
+#define LCD_COLOR_YELLOW    ILI9341_COLOR_YELLOW
+#define LCD_COLOR_GREEN     ILI9341_COLOR_GREEN
+#define LCD_COLOR_RED       ILI9341_COLOR_RED
+#define LCD_COLOR_DARK      ILI9341_COLOR_DARK
+#define LCD_COLOR_ORANGE    ILI9341_COLOR_ORANGE
+#define LCD_Init            ILI9341_Init
+#define LCD_FillScreen      ILI9341_FillScreen
+#define LCD_FillRect        ILI9341_FillRect
+#define LCD_DrawString      ILI9341_DrawString
+#define LCD_DrawRgb565Image ILI9341_DrawRgb565Image
+#endif
 #include "main.h"
 #include "robot_arm_kinematics.h"
 #include "tim.h"
@@ -122,7 +162,7 @@
 #define APP_LCD_UPDATE_INTERVAL_MS 500U
 #define APP_LCD_STATUS_HEIGHT 96U
 #define APP_LCD_CAMERA_Y APP_LCD_STATUS_HEIGHT
-#define APP_LCD_CAMERA_HEIGHT (ILI9341_HEIGHT - APP_LCD_CAMERA_Y)
+#define APP_LCD_CAMERA_HEIGHT (LCD_HEIGHT - APP_LCD_CAMERA_Y)
 
 typedef enum
 {
@@ -496,9 +536,9 @@ void App_DisplayCameraFrameRgb565(const uint16_t *pixels, uint16_t width, uint16
     return;
   }
 
-  if (draw_width > ILI9341_WIDTH)
+  if (draw_width > LCD_WIDTH)
   {
-    draw_width = ILI9341_WIDTH;
+    draw_width = LCD_WIDTH;
   }
 
   if (draw_height > APP_LCD_CAMERA_HEIGHT)
@@ -506,9 +546,9 @@ void App_DisplayCameraFrameRgb565(const uint16_t *pixels, uint16_t width, uint16
     draw_height = APP_LCD_CAMERA_HEIGHT;
   }
 
-  if (draw_width < ILI9341_WIDTH)
+  if (draw_width < LCD_WIDTH)
   {
-    x = (uint16_t)((ILI9341_WIDTH - draw_width) / 2U);
+    x = (uint16_t)((LCD_WIDTH - draw_width) / 2U);
   }
 
   if (draw_height < APP_LCD_CAMERA_HEIGHT)
@@ -516,8 +556,8 @@ void App_DisplayCameraFrameRgb565(const uint16_t *pixels, uint16_t width, uint16
     y = (uint16_t)(APP_LCD_CAMERA_Y + ((APP_LCD_CAMERA_HEIGHT - draw_height) / 2U));
   }
 
-  ILI9341_FillRect(0U, APP_LCD_CAMERA_Y, ILI9341_WIDTH, APP_LCD_CAMERA_HEIGHT, ILI9341_COLOR_BLACK);
-  ILI9341_DrawRgb565Image(x, y, draw_width, draw_height, pixels, stride_pixels);
+  LCD_FillRect(0U, APP_LCD_CAMERA_Y, LCD_WIDTH, APP_LCD_CAMERA_HEIGHT, LCD_COLOR_BLACK);
+  LCD_DrawRgb565Image(x, y, draw_width, draw_height, pixels, stride_pixels);
   app_camera_frame_seen = true;
   app_camera_frame_width = width;
   app_camera_frame_height = height;
@@ -526,10 +566,10 @@ void App_DisplayCameraFrameRgb565(const uint16_t *pixels, uint16_t width, uint16
 
 static void App_LcdInit(void)
 {
-  app_lcd_ready = ILI9341_Init();
+  app_lcd_ready = LCD_Init();
   if (app_lcd_ready)
   {
-    printf("[lcd] ili9341 init ok spi=SPI5 size=%ux%u\r\n", ILI9341_WIDTH, ILI9341_HEIGHT);
+    printf("[lcd] ili9341 init ok spi=SPI5 size=%ux%u\r\n", LCD_WIDTH, LCD_HEIGHT);
   }
   else
   {
@@ -544,11 +584,11 @@ static void App_LcdDrawStaticLayout(void)
     return;
   }
 
-  ILI9341_FillScreen(ILI9341_COLOR_BLACK);
-  ILI9341_FillRect(0U, 0U, ILI9341_WIDTH, 18U, ILI9341_COLOR_BLUE);
-  ILI9341_DrawString(4U, 4U, "ROBOT ARM", ILI9341_COLOR_WHITE, ILI9341_COLOR_BLUE, 1U);
-  ILI9341_DrawString(168U, 4U, "ILI9341", ILI9341_COLOR_WHITE, ILI9341_COLOR_BLUE, 1U);
-  ILI9341_FillRect(0U, (uint16_t)(APP_LCD_CAMERA_Y - 2U), ILI9341_WIDTH, 2U, ILI9341_COLOR_GRAY);
+  LCD_FillScreen(LCD_COLOR_BLACK);
+  LCD_FillRect(0U, 0U, LCD_WIDTH, 24U, LCD_COLOR_BLUE);
+  LCD_DrawString(4U, 4U, "ROBOT ARM", LCD_COLOR_WHITE, LCD_COLOR_BLUE, 2U);
+  LCD_DrawString(140U, 4U, "ILI9486", LCD_COLOR_WHITE, LCD_COLOR_BLUE, 2U);
+  LCD_FillRect(0U, (uint16_t)(APP_LCD_CAMERA_Y - 2U), LCD_WIDTH, 2U, LCD_COLOR_GRAY);
   App_LcdDrawCameraPlaceholder();
 }
 
@@ -568,7 +608,7 @@ static void App_LcdUpdate(uint32_t now)
   App_LcdDrawDashboard();
 }
 
-#define APP_LCD_LINE_FIELD_CHARS 36U
+#define APP_LCD_LINE_FIELD_CHARS 20U
 #define APP_LCD_LINE_BUFFER_LEN  (APP_LCD_LINE_FIELD_CHARS + 1U)
 
 static void App_LcdUpdateLine(uint16_t y, char *cache, const char *text, uint16_t color)
@@ -592,7 +632,7 @@ static void App_LcdUpdateLine(uint16_t y, char *cache, const char *text, uint16_
     return;
   }
 
-  ILI9341_DrawString(4U, y, padded, color, ILI9341_COLOR_BLACK, 1U);
+  LCD_DrawString(4U, y, padded, color, LCD_COLOR_BLACK, 2U);
   memcpy(cache, padded, APP_LCD_LINE_BUFFER_LEN);
 }
 
@@ -628,7 +668,7 @@ static void App_LcdDrawDashboard(void)
   {
     snprintf(line, sizeof(line), "MPU NO DATA");
   }
-  App_LcdUpdateLine(24U, cache_mpu, line, ILI9341_COLOR_CYAN);
+  App_LcdUpdateLine(32U, cache_mpu, line, LCD_COLOR_CYAN);
 
   if (app_obstacle_has_last_measurement)
   {
@@ -648,8 +688,8 @@ static void App_LcdDrawDashboard(void)
     cache_range[0] = '\0';
     last_obstacle_detected = app_obstacle_detected;
   }
-  App_LcdUpdateLine(40U, cache_range, line,
-                    app_obstacle_detected ? ILI9341_COLOR_RED : ILI9341_COLOR_GREEN);
+  App_LcdUpdateLine(56U, cache_range, line,
+                    app_obstacle_detected ? LCD_COLOR_RED : LCD_COLOR_GREEN);
 
   if (has_pose)
   {
@@ -664,16 +704,16 @@ static void App_LcdDrawDashboard(void)
   {
     snprintf(line, sizeof(line), "XYZ NO DATA");
   }
-  App_LcdUpdateLine(56U, cache_xyz, line, ILI9341_COLOR_YELLOW);
+  App_LcdUpdateLine(80U, cache_xyz, line, LCD_COLOR_YELLOW);
 
   snprintf(line,
            sizeof(line),
-           "PWM %u %u %u %u",
+           "%u %u %u %u",
            app_clamp_servo_current_pulse_us,
            app_fore_aft_servo_current_pulse_us,
            app_gripper_lift_servo_current_pulse_us,
            app_left_right_servo_current_pulse_us);
-  App_LcdUpdateLine(72U, cache_pwm, line, ILI9341_COLOR_WHITE);
+  App_LcdUpdateLine(104U, cache_pwm, line, LCD_COLOR_WHITE);
 
   if (!app_camera_frame_seen)
   {
@@ -687,7 +727,7 @@ static void App_LcdDrawDashboard(void)
     snprintf(line, sizeof(line), "CAM %ux%u #%lu",
              app_camera_frame_width, app_camera_frame_height,
              (unsigned long)app_camera_frame_count);
-    App_LcdUpdateLine(APP_LCD_CAMERA_Y, cache_cam, line, ILI9341_COLOR_GREEN);
+    App_LcdUpdateLine(APP_LCD_CAMERA_Y, cache_cam, line, LCD_COLOR_GREEN);
   }
 
   first_draw = false;
@@ -700,10 +740,10 @@ static void App_LcdDrawCameraPlaceholder(void)
     return;
   }
 
-  ILI9341_FillRect(0U, APP_LCD_CAMERA_Y, ILI9341_WIDTH, APP_LCD_CAMERA_HEIGHT, ILI9341_COLOR_DARK);
-  ILI9341_DrawString(18U, (uint16_t)(APP_LCD_CAMERA_Y + 34U), "OV7670 CAMERA", ILI9341_COLOR_WHITE, ILI9341_COLOR_DARK, 2U);
-  ILI9341_DrawString(30U, (uint16_t)(APP_LCD_CAMERA_Y + 62U), "WAITING FRAME", ILI9341_COLOR_ORANGE, ILI9341_COLOR_DARK, 2U);
-  ILI9341_DrawString(16U, (uint16_t)(APP_LCD_CAMERA_Y + 104U), "CALL APP DISPLAYCAMERAFRAMERGB565", ILI9341_COLOR_GRAY, ILI9341_COLOR_DARK, 1U);
+  LCD_FillRect(0U, APP_LCD_CAMERA_Y, LCD_WIDTH, APP_LCD_CAMERA_HEIGHT, LCD_COLOR_DARK);
+  LCD_DrawString(18U, (uint16_t)(APP_LCD_CAMERA_Y + 34U), "OV7670 CAMERA", LCD_COLOR_WHITE, LCD_COLOR_DARK, 2U);
+  LCD_DrawString(30U, (uint16_t)(APP_LCD_CAMERA_Y + 62U), "WAITING FRAME", LCD_COLOR_ORANGE, LCD_COLOR_DARK, 2U);
+  LCD_DrawString(16U, (uint16_t)(APP_LCD_CAMERA_Y + 104U), "WAITING FOR CAM...", LCD_COLOR_GRAY, LCD_COLOR_DARK, 2U);
 }
 
 void App_RunLoopIteration(void)
