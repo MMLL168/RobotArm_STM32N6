@@ -308,7 +308,7 @@ static const uint8_t *ILI9486_FindGlyph(char character)
 static void ILI9486_DrawChar(uint16_t x, uint16_t y, char character, uint16_t foreground, uint16_t background, uint8_t scale)
 {
   const uint8_t *glyph = ILI9486_FindGlyph(character);
-  uint8_t row_buffer[48];
+  uint8_t char_buffer[1536]; /* max scale 4: 24x32 pixels * 2 = 1536 bytes */
   uint16_t char_width;
   uint16_t char_height;
   uint8_t fg_high;
@@ -358,11 +358,12 @@ static void ILI9486_DrawChar(uint16_t x, uint16_t y, char character, uint16_t fo
       uint8_t source_col = (uint8_t)(output_col / scale);
       uint8_t bits = source_col < 5U ? glyph[source_col] : 0U;
       bool pixel_on = (bits & (1U << source_row)) != 0U;
-      row_buffer[output_col * 2U] = pixel_on ? fg_high : bg_high;
-      row_buffer[output_col * 2U + 1U] = pixel_on ? fg_low : bg_low;
+      uint32_t index = (output_row * char_width + output_col) * 2U;
+      char_buffer[index] = pixel_on ? fg_high : bg_high;
+      char_buffer[index + 1U] = pixel_on ? fg_low : bg_low;
     }
-    HAL_SPI_Transmit(&hspi5, row_buffer, (uint16_t)(char_width * 2U), ILI9486_SPI_TIMEOUT_MS);
   }
+  HAL_SPI_Transmit(&hspi5, char_buffer, (uint16_t)(char_width * char_height * 2U), ILI9486_SPI_TIMEOUT_MS);
 
   ILI9486_Unselect();
 }

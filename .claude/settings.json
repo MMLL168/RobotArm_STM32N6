@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(grep -n \"PH5\\\\|PH7\\\\|PH9\\\\|GPIO\\\\\\\\.PinState\\\\|Mcu\\\\\\\\.Pin\\\\|VP_SYS\\\\|.Mode=\\\\|Signal=\" \"d:/Work_202506/RobotArm/STM32N6/STM32N6.ioc\")",
+      "Bash(cmake --build .)",
+      "Read(//c/ST/**)",
+      "Read(//c/Program Files/STMicroelectronics/**)",
+      "Read(//c/ST/STM32CubeIDE_1.18.1/STM32CubeIDE/plugins/**)"
+    ]
+  }
+}

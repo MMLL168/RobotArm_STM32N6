@@ -662,3 +662,8 @@
 - Refactored pp_main.c to use APP_LCD_TYPE macro for switching drivers.
 - Identified large panel physically as a 3.2-inch 240x320 display, fixed horizontal clipping by reverting to 240x320 resolution.
 - Increased UI font scale from 1U to 2U for readability, resolving spacing and bounding box character limit issues (reduced line max to 20 chars).
+
+### 109. Optimize LCD SPI Transmit to Fix TOF Sensor Timeout
+- 日期時間：2026-04-30 14:10:00
+- 問題原因：字體放大到 scale=2 後，ILI9486_DrawChar 每印一個字元會呼叫 16 次 HAL_SPI_Transmit。當畫面字串變多時，頻繁的 SPI 傳輸 overhead 會將 main loop block 超過 100ms，導致緊接在後的 VL53L0X 讀取時，HAL_GetTick() 已經超過 100ms timeout 門檻，造成感測器看似離線 (timeout)。
+- 處理方式：將 ILI9341_DrawChar 與 ILI9486_DrawChar 的逐行傳輸，改為先在 memory buffer 組好整個字元的 pixel (最大 1536 bytes)，再一次性呼叫 HAL_SPI_Transmit。這讓 SPI 傳輸次數大幅減少 16 倍，解除對 main loop 的 blocking 延遲，解決畫面卡頓並恢復 TOF 感測器的穩定讀取。

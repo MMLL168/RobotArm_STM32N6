@@ -1,0 +1,43 @@
+{
+	"sources" : 
+	[
+		{
+			"file" : "D:/Work_202506/RobotArm/STM32N6/build/Debug/CMakeFiles/STM32N6_FSBL"
+		},
+		{
+			"file" : "D:/Work_202506/RobotArm/STM32N6/build/Debug/CMakeFiles/STM32N6_FSBL.rule"
+		},
+		{
+			"file" : "D:/Work_202506/RobotArm/STM32N6/build/Debug/CMakeFiles/STM32N6_FSBL-complete.rule"
+		},
+		{
+			"file" : "D:/Work_202506/RobotArm/STM32N6/build/Debug/FSBL/src/STM32N6_FSBL-stamp/STM32N6_FSBL-build.rule"
+		},
+		{
+			"file" : "D:/Work_202506/RobotArm/STM32N6/build/Debug/FSBL/src/STM32N6_FSBL-stamp/STM32N6_FSBL-configure.rule"
+		},
+		{
+			"file" : "D:/Work_202506/RobotArm/STM32N6/build/Debug/FSBL/src/STM32N6_FSBL-stamp/STM32N6_FSBL-download.rule"
+		},
+		{
+			"file" : "D:/Work_202506/RobotArm/STM32N6/build/Debug/FSBL/src/STM32N6_FSBL-stamp/STM32N6_FSBL-install.rule"
+		},
+		{
+			"file" : "D:/Work_202506/RobotArm/STM32N6/build/Debug/FSBL/src/STM32N6_FSBL-stamp/STM32N6_FSBL-mkdir.rule"
+		},
+		{
+			"file" : "D:/Work_202506/RobotArm/STM32N6/build/Debug/FSBL/src/STM32N6_FSBL-stamp/STM32N6_FSBL-patch.rule"
+		},
+		{
+			"file" : "D:/Work_202506/RobotArm/STM32N6/build/Debug/FSBL/src/STM32N6_FSBL-stamp/STM32N6_FSBL-update.rule"
+		}
+	],
+	"target" : 
+	{
+		"labels" : 
+		[
+			"STM32N6_FSBL"
+		],
+		"name" : "STM32N6_FSBL"
+	}
+}
